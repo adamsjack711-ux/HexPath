@@ -28,7 +28,7 @@ class ScanCliTests(unittest.TestCase):
         self.addCleanup(self.temporary_directory.cleanup)
         self.scope_path = Path(self.temporary_directory.name) / "scope.json"
         self.scope_path.write_text(
-            json.dumps({"name": "loopback", "targets": ["::1/128"]}),
+            json.dumps({"name": "test lab", "targets": ["2001:db8:1::/64"]}),
             encoding="utf-8",
         )
 
@@ -42,13 +42,13 @@ class ScanCliTests(unittest.TestCase):
                     "plan",
                     "--scope",
                     str(self.scope_path),
-                    "::1",
+                    "2001:db8:1::10",
                 ]
             )
 
         self.assertEqual(exit_code, 0)
         self.assertIn("nmap -6", output.getvalue())
-        self.assertIn("::1/128", output.getvalue())
+        self.assertIn("2001:db8:1::10/128", output.getvalue())
 
     @patch("hexpath.cli.parse_nmap_xml")
     @patch("hexpath.cli.run_nmap", return_value="<nmaprun/>")
@@ -65,7 +65,7 @@ class ScanCliTests(unittest.TestCase):
                     str(self.scope_path),
                     "--timeout",
                     "10",
-                    "::1",
+                    "2001:db8:1::10",
                 ]
             )
 

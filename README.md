@@ -14,6 +14,8 @@ HexPath currently provides:
 - NVD CVE lookup for CPEs reported by Nmap.
 - OSV package-version lookup based on the checking rules used by pkgxray.
 - Explicit coverage reporting that distinguishes a clean result from a failed or incomplete lookup.
+- Vantage-aware multi-host reachability modeling.
+- Directed attack-graph construction, ASCII terminal rendering, and Dijkstra path analysis.
 
 ## Workflow
 
@@ -54,15 +56,33 @@ hexpath scan run \
   2001:db8:1::10 > scan.json
 ```
 
+When a scan is actually run from an already reached host, record that host as
+the vantage point:
+
+```sh
+hexpath scan run \
+  --scope examples/lab-scope.example.json \
+  --profile services \
+  --vantage host:2001:db8:1::10 \
+  2001:db8:1::20 > scan-from-host-10.json
+```
+
+Use a host vantage only for a scan performed from that host. HexPath validates
+that the vantage address is inside the authorized IPv6 scope.
+
 Every target must be fully contained within an allowed IPv6 network. HexPath rejects broader networks and IPv4 targets before starting Nmap.
 
 ## CVE checking
 
-Check every service CPE in a saved scan against NVD:
+Check every unique service CPE across saved scans against NVD:
 
 ```sh
-hexpath cve scan --input scan.json > cve-results.json
+hexpath cve scan \
+  --input scan.json \
+  --input scan-from-host-10.json > cve-results.json
 ```
+
+Repeated services and CPEs are deduplicated, so the same CPE is queried once.
 
 Check one Nmap CPE directly:
 
@@ -80,6 +100,40 @@ Set `NVD_API_KEY` in the environment when an NVD API key is available. HexPath s
 
 CPE findings are candidate matches. Nmap identifies the product and version remotely, and NVD identifies applicable CVEs, but a vendor may have backported a patch without changing the reported version. HexPath therefore records these links as inferred, medium-confidence evidence until patch status is validated.
 
+## Attack graph
+
+Build a reusable graph file and display its ASCII representation:
+
+```sh
+hexpath graph build \
+  --scan scan.json \
+  --scan scan-from-host-10.json \
+  --cves cve-results.json \
+  --output graph.json
+```
+
+Display a saved graph again:
+
+```sh
+hexpath graph show --graph graph.json
+```
+
+Find and display the lowest-cost directed path to a selected host:
+
+```sh
+hexpath graph path \
+  --graph graph.json \
+  --target host:2001:db8:1::10
+```
+
+The terminal output uses ASCII branches and arrows. Pass `--json` to `graph build` or `graph path` when another program needs machine-readable output.
+
+Each scan contributes reachability only from its recorded vantage. A path can
+therefore continue from the entry point, through a candidate service finding to
+one host, and then through services observed by a scan run from that host.
+
+Candidate exploit costs use `11 - CVSS score`, plus a confidence penalty of `0` for high, `1.5` for medium, or `3` for low confidence. A missing CVSS score uses the neutral value `5.0`. Lower costs are prioritized by Dijkstra's algorithm. These costs rank investigation paths; they are not exploit probabilities.
+
 ## Tests
 
 ```sh
@@ -95,4 +149,5 @@ python -m unittest discover --start-directory tests --verbose
 
 ## Next milestone
 
-Build the weighted attack graph from the normalized hosts, services, CVEs, confidence levels, and supporting evidence.
+Add operator-supplied target selection and clearer path comparison when several
+evidence-backed routes reach the same host.

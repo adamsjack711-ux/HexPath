@@ -14,8 +14,10 @@ from hexpath.scanner import (
     NmapExecutionError,
     NmapParseError,
     ScanProfile,
+    ScannerError,
     build_nmap_command,
     parse_nmap_xml,
+    require_authorized_vantage,
     run_nmap,
 )
 from hexpath.scope import Scope, TargetOutsideScopeError
@@ -68,6 +70,18 @@ class NmapCommandTests(unittest.TestCase):
                 ["2001:db8::/32"],
                 ScanProfile.DISCOVERY,
             )
+
+    def test_accepts_authorized_host_as_scan_vantage(self) -> None:
+        vantage = require_authorized_vantage(
+            self.scope,
+            "host:2001:db8:1::10",
+        )
+
+        self.assertEqual(vantage, "host:2001:db8:1::10")
+
+    def test_rejects_out_of_scope_scan_vantage(self) -> None:
+        with self.assertRaisesRegex(ScannerError, "invalid scan vantage"):
+            require_authorized_vantage(self.scope, "host:2001:db8:2::10")
 
 
 class NmapRunnerTests(unittest.TestCase):
@@ -142,6 +156,7 @@ class NmapXmlParserTests(unittest.TestCase):
         self.assertEqual(result.services[1].state, ServiceState.OPEN_FILTERED)
 
         document = json.loads(result.to_json())
+        self.assertEqual(document["vantage"], "entry:scanner")
         self.assertEqual(document["hosts"][0]["hostnames"], ["server.lab"])
         self.assertEqual(document["services"][0]["protocol"], "tcp")
 

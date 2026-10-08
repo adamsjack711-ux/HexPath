@@ -70,7 +70,10 @@ class ScanCliTests(unittest.TestCase):
             )
 
         self.assertEqual(exit_code, 0)
-        self.assertEqual(json.loads(output.getvalue()), {"hosts": [], "services": []})
+        self.assertEqual(
+            json.loads(output.getvalue()),
+            {"vantage": "entry:scanner", "hosts": [], "services": []},
+        )
 
     def test_plan_reports_out_of_scope_target(self) -> None:
         errors = StringIO()
@@ -179,7 +182,7 @@ class CveCliTests(unittest.TestCase):
         self.assertEqual(document["status"], "clean")
         self.assertEqual(document["cpe"], "cpe:2.3:a:openbsd:openssh:9.6:*:*:*:*:*:*:*")
 
-    @patch("hexpath.cli.check_scan_document")
+    @patch("hexpath.cli.check_scan_documents")
     def test_scan_check_reads_normalized_scan_json(self, check_mock) -> None:
         check_mock.return_value = ScanVulnerabilityResult(
             checks=(),
@@ -199,6 +202,169 @@ class CveCliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(json.loads(output.getvalue())["status"], "clean")
         check_mock.assert_called_once()
+        self.assertEqual(len(check_mock.call_args.args[0]), 1)
+
+    @patch("hexpath.cli.check_scan_documents")
+    def test_scan_check_accepts_multiple_vantage_files(self, check_mock) -> None:
+        check_mock.return_value = ScanVulnerabilityResult(
+            checks=(),
+            vulnerabilities=(),
+            matches=(),
+            service_count=0,
+        )
+        temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+        first_path = Path(temporary_directory.name) / "first.json"
+        second_path = Path(temporary_directory.name) / "second.json"
+        first_path.write_text('{"hosts": [], "services": []}', encoding="utf-8")
+        second_path.write_text('{"hosts": [], "services": []}', encoding="utf-8")
+
+        with redirect_stdout(StringIO()):
+            exit_code = main(
+                [
+                    "cve",
+                    "scan",
+                    "--input",
+                    str(first_path),
+                    "--input",
+                    str(second_path),
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(check_mock.call_args.args[0]), 2)
+
+
+class GraphCliTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary_directory.cleanup)
+        self.directory = Path(self.temporary_directory.name)
+
+    def test_build_writes_attack_graph_json(self) -> None:
+        scan_path = self.directory / "scan.json"
+        cve_path = self.directory / "cves.json"
+        scan_path.write_text('{"hosts":[],"services":[]}', encoding="utf-8")
+        cve_path.write_text(
+            '{"vulnerabilities":[],"matches":[]}',
+            encoding="utf-8",
+        )
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(
+                [
+                    "graph",
+                    "build",
+                    "--scan",
+                    str(scan_path),
+                    "--cves",
+                    str(cve_path),
+                    "--json",
+                ]
+            )
+
+        document = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(document["nodes"][0]["id"], "entry:scanner")
+        self.assertEqual(document["edges"], [])
+
+    def test_path_reads_graph_and_runs_dijkstra(self) -> None:
+        graph_path = self.directory / "graph.json"
+        graph_path.write_text(
+            json.dumps(
+                {
+                    "nodes": [
+                        {"id": "entry:scanner", "kind": "entry", "label": "entry"},
+                        {"id": "host:target", "kind": "host", "label": "target"},
+                    ],
+                    "edges": [
+                        {
+                            "id": "edge-1",
+                            "source": "entry:scanner",
+                            "target": "host:target",
+                            "relationship": "transition",
+                            "weight": 2.5,
+                            "description": "test transition",
+                            "evidence": [
+                                {
+                                    "source": "test",
+                                    "summary": "test evidence",
+                                    "level": "observed",
+                                    "collected_at": "2026-10-08T18:30:00+00:00",
+                                    "reference": None,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(
+                [
+                    "graph",
+                    "path",
+                    "--graph",
+                    str(graph_path),
+                    "--target",
+                    "host:target",
+                    "--json",
+                ]
+            )
+
+        document = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(document["nodes"], ["entry:scanner", "host:target"])
+        self.assertEqual(document["total_weight"], 2.5)
+
+    def test_show_renders_ascii_graph(self) -> None:
+        graph_path = self.directory / "graph.json"
+        graph_path.write_text(
+            json.dumps(
+                {
+                    "nodes": [
+                        {"id": "entry:scanner", "kind": "entry", "label": "entry"},
+                        {"id": "host:target", "kind": "host", "label": "target"},
+                    ],
+                    "edges": [
+                        {
+                            "id": "edge-1",
+                            "source": "entry:scanner",
+                            "target": "host:target",
+                            "relationship": "candidate_exploit",
+                            "weight": 2.5,
+                            "description": "test transition",
+                            "evidence": [
+                                {
+                                    "source": "test",
+                                    "summary": "test evidence",
+                                    "level": "observed",
+                                    "collected_at": "2026-10-08T18:30:00+00:00",
+                                    "reference": None,
+                                }
+                            ],
+                            "metadata": {"cve_id": "CVE-2026-12345"},
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(["graph", "show", "--graph", str(graph_path)])
+
+        rendered = output.getvalue()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("HexPath Attack Graph", rendered)
+        self.assertIn("+--", rendered)
+        self.assertIn("-->", rendered)
+        self.assertIn("CVE-2026-12345", rendered)
 
 
 if __name__ == "__main__":

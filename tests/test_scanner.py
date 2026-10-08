@@ -94,6 +94,17 @@ class NmapCommandTests(unittest.TestCase):
                 ports="--script=unsafe",
             )
 
+    def test_rejects_range_with_an_empty_bound(self) -> None:
+        for value in ("22-", "22--80"):
+            with self.subTest(ports=value):
+                with self.assertRaisesRegex(ScannerError, "invalid port range"):
+                    build_nmap_command(
+                        self.scope,
+                        ["2001:db8:1::10"],
+                        ScanProfile.SERVICES,
+                        ports=value,
+                    )
+
     def test_rejects_target_that_is_broader_than_scope(self) -> None:
         with self.assertRaises(TargetOutsideScopeError):
             build_nmap_command(

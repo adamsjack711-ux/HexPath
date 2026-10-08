@@ -10,7 +10,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 import json
+import math
 import re
+import time
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -28,6 +30,12 @@ from hexpath.models import (
 OSV_QUERY_URL = "https://api.osv.dev/v1/query"
 NVD_CVE_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 DEFAULT_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+NVD_RESULTS_PER_PAGE = 2000
+NVD_INTERVAL_WITHOUT_KEY_SECONDS = 6.0
+NVD_INTERVAL_WITH_KEY_SECONDS = 0.6
+NVD_DEFAULT_MAX_RETRIES = 3
+MAX_RETRY_AFTER_SECONDS = 120.0
+_RETRYABLE_HTTP_STATUSES = frozenset({403, 429, 503})
 _CVE_PATTERN = re.compile(r"^CVE-[0-9]{4}-[0-9]{4,}$", re.IGNORECASE)
 
 
@@ -37,6 +45,21 @@ class VulnerabilityError(ValueError):
 
 class VulnerabilityLookupError(RuntimeError):
     """Raised when a vulnerability provider cannot complete a lookup."""
+
+
+class VulnerabilityHttpError(VulnerabilityLookupError):
+    """A provider answered with an HTTP error status."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int,
+        retry_after: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        self.retry_after = retry_after
 
 
 class VulnerabilityStatus(StrEnum):
@@ -358,7 +381,12 @@ class OsvClient:
 
 
 class NvdClient:
-    """Bounded client for exact CPE lookups in the NVD CVE API."""
+    """Bounded, rate-limited client for exact CPE lookups in the NVD CVE API.
+
+    NVD throttles callers: requests are spaced out (6 seconds apart without an
+    API key, 0.6 seconds with one), throttling responses are retried with
+    backoff, and results spread over several pages are all fetched.
+    """
 
     def __init__(
         self,
@@ -367,18 +395,73 @@ class NvdClient:
         max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
         api_key: str | None = None,
         transport: Transport | None = None,
+        min_interval_seconds: float | None = None,
+        max_retries: int = NVD_DEFAULT_MAX_RETRIES,
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if timeout_seconds <= 0:
             raise VulnerabilityError("timeout_seconds must be greater than zero")
         if max_response_bytes <= 0:
             raise VulnerabilityError("max_response_bytes must be greater than zero")
+        if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 0:
+            raise VulnerabilityError("max_retries must be a non-negative integer")
         self.timeout_seconds = timeout_seconds
         self.max_response_bytes = max_response_bytes
         self.api_key = api_key.strip() if api_key and api_key.strip() else None
+        if min_interval_seconds is None:
+            min_interval_seconds = (
+                NVD_INTERVAL_WITH_KEY_SECONDS
+                if self.api_key is not None
+                else NVD_INTERVAL_WITHOUT_KEY_SECONDS
+            )
+        if not math.isfinite(min_interval_seconds) or min_interval_seconds < 0:
+            raise VulnerabilityError("min_interval_seconds must be zero or greater")
+        self.min_interval_seconds = float(min_interval_seconds)
+        self.max_retries = max_retries
         self._transport = transport or _response_reader("NVD")
+        self._sleep = sleep
+        self._clock = clock
+        self._last_request_at: float | None = None
 
     def query_cpe(self, cpe: CpeIdentity) -> tuple[Vulnerability, ...]:
-        query = urlencode({"cpeName": cpe.value})
+        """Return every CVE NVD lists for the CPE, fetching all result pages."""
+        collected: dict[str, Vulnerability] = {}
+        received = 0
+        expected_total: int | None = None
+        while True:
+            document = self._get_page(cpe, received)
+            page, total = _parse_nvd_page(document, expected_start=received)
+            if expected_total is None:
+                expected_total = total
+            elif total != expected_total:
+                raise VulnerabilityLookupError(
+                    "NVD result count changed during pagination; try the lookup again"
+                )
+            for vulnerability in page:
+                collected.setdefault(vulnerability.cve_id, vulnerability)
+            received += len(page)
+            if received >= expected_total:
+                break
+            if not page:
+                raise VulnerabilityLookupError(
+                    f"NVD returned an empty page after {received} of "
+                    f"{expected_total} results"
+                )
+        if received != expected_total:
+            raise VulnerabilityLookupError(
+                f"NVD returned {received} results but reported {expected_total}"
+            )
+        return tuple(collected.values())
+
+    def _get_page(self, cpe: CpeIdentity, start_index: int) -> Any:
+        query = urlencode(
+            {
+                "cpeName": cpe.value,
+                "resultsPerPage": NVD_RESULTS_PER_PAGE,
+                "startIndex": start_index,
+            }
+        )
         headers = {
             "Accept": "application/json",
             "User-Agent": "hexpath/0.1.0",
@@ -386,20 +469,55 @@ class NvdClient:
         if self.api_key is not None:
             headers["apiKey"] = self.api_key
         request = Request(f"{NVD_CVE_URL}?{query}", headers=headers, method="GET")
-        try:
-            raw_response = self._transport(
-                request,
-                self.timeout_seconds,
-                self.max_response_bytes,
-            )
-            document = json.loads(raw_response)
-        except VulnerabilityLookupError:
-            raise
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise VulnerabilityLookupError("NVD returned invalid JSON") from error
-        except Exception as error:
-            raise VulnerabilityLookupError(f"NVD request failed: {error}") from error
-        return _parse_nvd_response(document)
+
+        attempt = 0
+        while True:
+            self._wait_for_request_slot()
+            try:
+                raw_response = self._transport(
+                    request,
+                    self.timeout_seconds,
+                    self.max_response_bytes,
+                )
+            except VulnerabilityHttpError as error:
+                if error.status not in _RETRYABLE_HTTP_STATUSES:
+                    raise
+                if attempt >= self.max_retries:
+                    raise VulnerabilityLookupError(
+                        f"{error} after {self.max_retries} retries; "
+                        + (
+                            "NVD may be throttling requests or rejecting the API key"
+                            if self.api_key is not None
+                            else "NVD is throttling requests "
+                            "(set NVD_API_KEY for a higher limit)"
+                        )
+                    ) from error
+                self._sleep(self._retry_delay(error, attempt))
+                attempt += 1
+                continue
+            except VulnerabilityLookupError:
+                raise
+            except Exception as error:
+                raise VulnerabilityLookupError(f"NVD request failed: {error}") from error
+            try:
+                return json.loads(raw_response)
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise VulnerabilityLookupError("NVD returned invalid JSON") from error
+
+    def _wait_for_request_slot(self) -> None:
+        if self._last_request_at is not None:
+            remaining = self._last_request_at + self.min_interval_seconds - self._clock()
+            if remaining > 0:
+                self._sleep(remaining)
+        self._last_request_at = self._clock()
+
+    def _retry_delay(self, error: VulnerabilityHttpError, attempt: int) -> float:
+        if error.retry_after is not None:
+            return min(error.retry_after, MAX_RETRY_AFTER_SECONDS)
+        return min(
+            max(self.min_interval_seconds, 1.0) * (2**attempt),
+            MAX_RETRY_AFTER_SECONDS,
+        )
 
 
 def check_package(
@@ -596,7 +714,11 @@ def _read_response(
                     )
             body = response.read(max_bytes + 1)
     except HTTPError as error:
-        raise VulnerabilityLookupError(f"{provider} returned HTTP {error.code}") from error
+        raise VulnerabilityHttpError(
+            f"{provider} returned HTTP {error.code}",
+            status=error.code,
+            retry_after=_retry_after_seconds(error.headers),
+        ) from error
     except URLError as error:
         raise VulnerabilityLookupError(
             f"{provider} request failed: {error.reason}"
@@ -618,18 +740,47 @@ def _parse_osv_response(document: Any) -> tuple[OsvAdvisory, ...]:
     return tuple(_parse_advisory(item) for item in raw_vulnerabilities)
 
 
-def _parse_nvd_response(document: Any) -> tuple[Vulnerability, ...]:
+def _retry_after_seconds(headers: Any) -> float | None:
+    """Read a Retry-After header given in seconds; ignore anything else."""
+    if headers is None:
+        return None
+    raw_value = headers.get("Retry-After")
+    if raw_value is None:
+        return None
+    try:
+        seconds = float(str(raw_value).strip())
+    except ValueError:
+        return None
+    if not math.isfinite(seconds) or seconds < 0:
+        return None
+    return seconds
+
+
+def _parse_nvd_page(
+    document: Any,
+    *,
+    expected_start: int,
+) -> tuple[tuple[Vulnerability, ...], int]:
+    """Validate one NVD results page and return its CVEs and the overall total."""
     if not isinstance(document, dict):
         raise VulnerabilityLookupError("NVD returned an invalid response object")
     raw_vulnerabilities = document.get("vulnerabilities")
     total_results = document.get("totalResults")
-    if not isinstance(raw_vulnerabilities, list) or not isinstance(total_results, int):
+    if (
+        not isinstance(raw_vulnerabilities, list)
+        or isinstance(total_results, bool)
+        or not isinstance(total_results, int)
+        or total_results < 0
+    ):
         raise VulnerabilityLookupError("NVD returned an invalid vulnerability list")
-    if total_results != len(raw_vulnerabilities):
+    start_index = document.get("startIndex", expected_start)
+    if start_index != expected_start:
         raise VulnerabilityLookupError(
-            "NVD response was incomplete; pagination is required for this CPE"
+            f"NVD returned a page starting at {start_index!r} during pagination; "
+            f"expected {expected_start}"
         )
-    return tuple(_parse_nvd_vulnerability(item) for item in raw_vulnerabilities)
+    page = tuple(_parse_nvd_vulnerability(item) for item in raw_vulnerabilities)
+    return page, total_results
 
 
 def _parse_nvd_vulnerability(document: Any) -> Vulnerability:

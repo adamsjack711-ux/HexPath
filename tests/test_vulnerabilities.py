@@ -14,6 +14,7 @@ from hexpath.vulnerabilities import (
     PackageIdentity,
     PackageVulnerabilityResult,
     VulnerabilityError,
+    VulnerabilityHttpError,
     VulnerabilityLookupError,
     VulnerabilityStatus,
     check_cpe,
@@ -229,7 +230,8 @@ class NvdClientTests(unittest.TestCase):
             "vulnerabilities": [{"cve": {"id": "CVE-2026-12345"}}],
         }
         client = NvdClient(
-            transport=lambda _request, _timeout, _limit: json.dumps(response).encode()
+            transport=lambda _request, _timeout, _limit: json.dumps(response).encode(),
+            min_interval_seconds=0,
         )
 
         result = check_cpe(self.cpe, client=client)
@@ -240,13 +242,221 @@ class NvdClientTests(unittest.TestCase):
     @patch("hexpath.vulnerabilities.urlopen")
     def test_default_transport_errors_name_nvd(self, open_mock) -> None:
         open_mock.side_effect = HTTPError(
-            "https://services.nvd.nist.gov/", 403, "Forbidden", {}, None
+            "https://services.nvd.nist.gov/", 404, "Not Found", {}, None
         )
 
         result = check_cpe(self.cpe, client=NvdClient())
 
         self.assertEqual(result.status, VulnerabilityStatus.UNKNOWN)
-        self.assertEqual(result.error, "NVD returned HTTP 403")
+        self.assertEqual(result.error, "NVD returned HTTP 404")
+
+    @patch("hexpath.vulnerabilities.urlopen")
+    def test_default_transport_honours_retry_after_header(self, open_mock) -> None:
+        fake_time = FakeTime()
+        open_mock.side_effect = HTTPError(
+            "https://services.nvd.nist.gov/",
+            429,
+            "Too Many Requests",
+            {"Retry-After": "7"},
+            None,
+        )
+        client = NvdClient(max_retries=1, sleep=fake_time.sleep, clock=fake_time.clock)
+
+        result = check_cpe(self.cpe, client=client)
+
+        self.assertEqual(open_mock.call_count, 2)
+        self.assertEqual(fake_time.sleeps, [7.0])
+        self.assertEqual(result.status, VulnerabilityStatus.UNKNOWN)
+
+
+class FakeTime:
+    """A controllable clock so rate-limit tests never really sleep."""
+
+    def __init__(self) -> None:
+        self.now = 100.0
+        self.sleeps: list[float] = []
+
+    def clock(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(round(seconds, 4))
+        self.now += seconds
+
+
+def nvd_page(cve_ids: list[str], *, total: int, start: int = 0) -> bytes:
+    return json.dumps(
+        {
+            "resultsPerPage": len(cve_ids),
+            "startIndex": start,
+            "totalResults": total,
+            "vulnerabilities": [{"cve": {"id": cve_id}} for cve_id in cve_ids],
+        }
+    ).encode()
+
+
+def throttled(status: int = 429, retry_after: float | None = None) -> VulnerabilityHttpError:
+    return VulnerabilityHttpError(
+        f"NVD returned HTTP {status}",
+        status=status,
+        retry_after=retry_after,
+    )
+
+
+class NvdRateLimitTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.time = FakeTime()
+        self.ssh = CpeIdentity("cpe:/a:openbsd:openssh:9.6")
+        self.web = CpeIdentity("cpe:/a:apache:http_server:2.4.58")
+
+    def client(self, transport, **options) -> NvdClient:
+        return NvdClient(
+            transport=transport,
+            sleep=self.time.sleep,
+            clock=self.time.clock,
+            **options,
+        )
+
+    def test_spaces_requests_six_seconds_apart_without_api_key(self) -> None:
+        client = self.client(lambda *_args: nvd_page([], total=0))
+
+        check_cpe(self.ssh, client=client)
+        check_cpe(self.web, client=client)
+
+        self.assertEqual(self.time.sleeps, [6.0])
+
+    def test_api_key_allows_shorter_spacing(self) -> None:
+        client = self.client(lambda *_args: nvd_page([], total=0), api_key="key")
+
+        check_cpe(self.ssh, client=client)
+        check_cpe(self.web, client=client)
+
+        self.assertEqual(self.time.sleeps, [0.6])
+
+    def test_no_wait_when_enough_time_has_already_passed(self) -> None:
+        client = self.client(lambda *_args: nvd_page([], total=0))
+
+        check_cpe(self.ssh, client=client)
+        self.time.now += 10
+        check_cpe(self.web, client=client)
+
+        self.assertEqual(self.time.sleeps, [])
+
+    def test_throttled_request_is_retried_with_backoff(self) -> None:
+        responses = [throttled(429), nvd_page(["CVE-2024-6387"], total=1)]
+
+        def transport(*_args):
+            response = responses.pop(0)
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+        result = check_cpe(self.ssh, client=self.client(transport))
+
+        self.assertEqual(result.status, VulnerabilityStatus.VULNERABLE)
+        self.assertEqual(result.vulnerabilities[0].cve_id, "CVE-2024-6387")
+        self.assertEqual(self.time.sleeps, [6.0])
+
+    def test_retry_after_header_overrides_backoff(self) -> None:
+        responses = [throttled(503, retry_after=20), nvd_page([], total=0)]
+
+        def transport(*_args):
+            response = responses.pop(0)
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+        result = check_cpe(self.ssh, client=self.client(transport))
+
+        self.assertTrue(result.completed)
+        self.assertEqual(self.time.sleeps, [20.0])
+
+    def test_gives_up_after_max_retries_and_stays_unknown(self) -> None:
+        calls = []
+
+        def transport(*_args):
+            calls.append(1)
+            raise throttled(403)
+
+        result = check_cpe(self.ssh, client=self.client(transport, max_retries=2))
+
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(self.time.sleeps, [6.0, 12.0])
+        self.assertEqual(result.status, VulnerabilityStatus.UNKNOWN)
+        self.assertIn("after 2 retries", result.error)
+        self.assertIn("NVD_API_KEY", result.error)
+
+    def test_other_http_errors_are_not_retried(self) -> None:
+        calls = []
+
+        def transport(*_args):
+            calls.append(1)
+            raise throttled(404)
+
+        result = check_cpe(self.ssh, client=self.client(transport))
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(result.error, "NVD returned HTTP 404")
+
+    def test_rejects_invalid_rate_limit_settings(self) -> None:
+        with self.assertRaisesRegex(VulnerabilityError, "min_interval_seconds"):
+            NvdClient(min_interval_seconds=-1)
+        with self.assertRaisesRegex(VulnerabilityError, "max_retries"):
+            NvdClient(max_retries=-1)
+
+
+class NvdPaginationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.time = FakeTime()
+        self.cpe = CpeIdentity("cpe:/o:linux:linux_kernel:6.1")
+
+    def client(self, transport) -> NvdClient:
+        return NvdClient(transport=transport, sleep=self.time.sleep, clock=self.time.clock)
+
+    def test_fetches_every_page_until_total_is_reached(self) -> None:
+        pages = [
+            nvd_page(["CVE-2026-0001", "CVE-2026-0002"], total=3, start=0),
+            nvd_page(["CVE-2026-0003"], total=3, start=2),
+        ]
+        urls = []
+
+        def transport(request, *_args):
+            urls.append(request.full_url)
+            return pages.pop(0)
+
+        result = check_cpe(self.cpe, client=self.client(transport))
+
+        self.assertTrue(result.completed)
+        self.assertEqual(
+            [item.cve_id for item in result.vulnerabilities],
+            ["CVE-2026-0001", "CVE-2026-0002", "CVE-2026-0003"],
+        )
+        self.assertIn("resultsPerPage=2000", urls[0])
+        self.assertIn("startIndex=0", urls[0])
+        self.assertIn("startIndex=2", urls[1])
+        self.assertEqual(self.time.sleeps, [6.0])
+
+    def test_empty_page_before_total_is_unknown(self) -> None:
+        pages = [
+            nvd_page(["CVE-2026-0001"], total=3, start=0),
+            nvd_page([], total=3, start=1),
+        ]
+
+        result = check_cpe(self.cpe, client=self.client(lambda *_args: pages.pop(0)))
+
+        self.assertEqual(result.status, VulnerabilityStatus.UNKNOWN)
+        self.assertIn("empty page after 1 of 3", result.error)
+
+    def test_changed_total_between_pages_is_unknown(self) -> None:
+        pages = [
+            nvd_page(["CVE-2026-0001"], total=2, start=0),
+            nvd_page(["CVE-2026-0002"], total=5, start=1),
+        ]
+
+        result = check_cpe(self.cpe, client=self.client(lambda *_args: pages.pop(0)))
+
+        self.assertEqual(result.status, VulnerabilityStatus.UNKNOWN)
+        self.assertIn("count changed", result.error)
 
 
 class ScanVulnerabilityTests(unittest.TestCase):

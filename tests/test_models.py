@@ -114,6 +114,37 @@ class HostAndServiceTests(unittest.TestCase):
                 state=ServiceState.OPEN,
             )
 
+    def _service_with_cpe(self, cpe: str) -> Service:
+        return Service(
+            host="2001:db8::1",
+            port=22,
+            protocol=TransportProtocol.TCP,
+            state=ServiceState.OPEN,
+            cpes=(cpe,),
+        )
+
+    def test_service_accepts_well_formed_cpes(self) -> None:
+        for cpe in (
+            "cpe:/a:openbsd:openssh:9.6",
+            "cpe:/o:linux:linux_kernel",
+            "cpe:2.3:a:openbsd:openssh:9.6:*:*:*:*:*:*:*",
+            "cpe:/a:vendor:prod~uct:1.0",
+        ):
+            with self.subTest(cpe=cpe):
+                self.assertEqual(self._service_with_cpe(cpe).cpes, (cpe,))
+
+    def test_service_rejects_structurally_invalid_cpes(self) -> None:
+        for cpe in (
+            "cpe:/x:bad:part",
+            "cpe:/a",
+            "cpe:/a:a:b:c:d:e:f:g",
+            "cpe:2.3:a:only:five:fields",
+            "not-a-cpe",
+        ):
+            with self.subTest(cpe=cpe):
+                with self.assertRaises(ModelError):
+                    self._service_with_cpe(cpe)
+
 
 class VulnerabilityTests(unittest.TestCase):
     def test_vulnerability_normalizes_cve_identifier(self) -> None:

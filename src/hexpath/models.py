@@ -13,7 +13,7 @@ from uuid import uuid4
 
 
 _CVE_PATTERN = re.compile(r"^CVE-[0-9]{4}-[0-9]{4,}$")
-_CPE_PREFIXES = ("cpe:/", "cpe:2.3:")
+_CPE_PARTS = {"a", "h", "o"}
 
 
 class ModelError(ValueError):
@@ -89,10 +89,22 @@ def _normalize_cve_id(value: str) -> str:
 
 
 def _normalize_cpe(value: str) -> str:
+    # Validate structure here so a Service never carries a CPE the vulnerability
+    # checker would then reject. A well-formed but complex 2.2 name (one using
+    # escaped or wildcard components) is still accepted: it is a real CPE, and
+    # the CVE checker reports it as uncheckable rather than aborting the scan.
     cpe = _require_text(value, "cpe")
-    if not cpe.startswith(_CPE_PREFIXES):
-        raise ModelError("cpe must use CPE 2.2 URI or CPE 2.3 formatted syntax")
-    return cpe
+    if cpe.startswith("cpe:2.3:"):
+        fields = cpe.split(":")
+        if len(fields) != 13 or fields[2] not in _CPE_PARTS:
+            raise ModelError("cpe must be a well-formed CPE 2.3 name")
+        return cpe
+    if cpe.startswith("cpe:/"):
+        parts = cpe[len("cpe:/"):].split(":")
+        if not 3 <= len(parts) <= 7 or parts[0] not in _CPE_PARTS:
+            raise ModelError("cpe must be a well-formed CPE 2.2 name")
+        return cpe
+    raise ModelError("cpe must use CPE 2.2 URI or CPE 2.3 formatted syntax")
 
 
 def _require_unique(values: tuple[str, ...], record_name: str) -> None:

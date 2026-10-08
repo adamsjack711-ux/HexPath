@@ -175,8 +175,8 @@ class QuickCliTests(unittest.TestCase):
             )
 
         self.assertEqual(exit_code, 0)
-        self.assertIn("[VANTAGE] ::1 <host:::1>", output.getvalue())
-        self.assertIn("(no hosts discovered)", output.getvalue())
+        self.assertIn("SERVER / VANTAGE", output.getvalue())
+        self.assertIn("NO HOSTS DISCOVERED", output.getvalue())
         scan_document = check_mock.call_args.args[0][0]
         self.assertEqual(scan_document["vantage"], "host:::1")
         self.assertEqual(scan_document["hosts"][0]["id"], "host:::1")

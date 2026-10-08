@@ -83,12 +83,28 @@ assessment as structured scan, CVE, and graph data:
 ```text
 HexPath Network Topology
 ========================
-[ENTRY] Scanner <entry:scanner>
-+-- [HOST] 2001:db8:1::10 (web.lab) <host:2001:db8:1::10>
-    +-- [SERVICE] tcp/22 open OpenSSH 9.6
-    |   +-- [CVE] CVE-2024-6387 score=9.0 confidence=medium
-    +-- [SERVICE] tcp/443 open nginx 1.26
-        +-- (no CVE candidates)
+               +------------------+
+               | SERVER / SCANNER |
+               |  entry:scanner   |
+               +------------------+
+                         |
+                 +--------------+
+                 |     HOST     |
+                 | 2001:db8::10 |
+                 |   web.lab    |
+                 +--------------+
+                         |
+           +-------------+-------------+
+           |                           |
++---------------------+    +----------------------+
+| SERVICE tcp/22 OPEN |    | SERVICE tcp/443 OPEN |
+|     OpenSSH 9.6     |    |      nginx 1.26      |
++---------------------+    +----------------------+
+           |                           |
+ +-------------------+       +-------------------+
+ |   CVE-2024-6387   |       | NO CVE CANDIDATES |
+ | CVSS 9.0 | MEDIUM |       +-------------------+
+ +-------------------+
 ```
 
 Use a different scope file with `--scope`, or set `HEXPATH_SCOPE` once in the

@@ -8,6 +8,7 @@ from enum import StrEnum
 import heapq
 import json
 import math
+import textwrap
 from typing import Any
 
 from hexpath.models import Confidence, Evidence, EvidenceLevel
@@ -543,8 +544,21 @@ def render_attack_graph_ascii(graph: AttackGraph) -> str:
     return "\n".join(lines)
 
 
+@dataclass(frozen=True, slots=True)
+class _TopologyTree:
+    labels: tuple[str, ...]
+    children: tuple["_TopologyTree", ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _RenderedTree:
+    lines: tuple[str, ...]
+    width: int
+    root_center: int
+
+
 def render_topology_ascii(scan_document: Any, cve_document: Any) -> str:
-    """Render all discovered hosts, services, and CVE candidates as ASCII."""
+    """Render the complete topology as a boxed top-down ASCII tree."""
     if isinstance(scan_document, dict):
         scan_documents = (scan_document,)
     elif isinstance(scan_document, (list, tuple)) and scan_document:
@@ -586,16 +600,6 @@ def render_topology_ascii(scan_document: Any, cve_document: Any) -> str:
             document.get("vantage", ENTRY_NODE_ID),
             "scan vantage",
         )
-        if document_index:
-            lines.append("")
-        if vantage == ENTRY_NODE_ID:
-            lines.append(f"[ENTRY] Scanner <{ENTRY_NODE_ID}>")
-        else:
-            lines.append(
-                f"[VANTAGE] {_terminal_text(vantage.removeprefix('host:'))} "
-                f"<{_terminal_text(vantage)}>"
-            )
-
         hosts: list[tuple[str, dict[str, Any]]] = []
         host_ids: set[str] = set()
         for raw_host in raw_hosts:
@@ -627,57 +631,67 @@ def render_topology_ascii(scan_document: Any, cve_document: Any) -> str:
             for item in hosts
             if item[0] != vantage or services_by_host[item[0]]
         ]
-        if not visible_hosts:
-            lines.append("+-- (no hosts discovered)")
-            continue
-
-        for host_index, (host_id, host) in enumerate(visible_hosts):
-            host_last = host_index == len(visible_hosts) - 1
-            host_prefix = "    " if host_last else "|   "
-            address = _terminal_text(str(host.get("address", host_id)))
+        host_nodes: list[_TopologyTree] = []
+        for host_id, host in visible_hosts:
+            address = str(host.get("address", host_id))
             raw_hostnames = host.get("hostnames", [])
             hostnames = (
-                ", ".join(_terminal_text(name) for name in raw_hostnames)
+                ", ".join(str(name) for name in raw_hostnames)
                 if isinstance(raw_hostnames, list)
                 else ""
             )
-            hostname_text = f" ({hostnames})" if hostnames else ""
-            lines.append(
-                f"+-- [HOST] {address}{hostname_text} <{_terminal_text(host_id)}>"
-            )
-
+            host_labels = ("HOST", address, *((hostnames,) if hostnames else ()))
+            service_nodes: list[_TopologyTree] = []
             host_services = services_by_host[host_id]
             if not host_services:
-                lines.append(f"{host_prefix}+-- (no services discovered)")
-                continue
-            for service_index, (service_id, service) in enumerate(host_services):
-                service_last = service_index == len(host_services) - 1
-                service_prefix = host_prefix + ("    " if service_last else "|   ")
-                protocol = _terminal_text(str(service.get("protocol", "unknown")))
-                port = _terminal_text(str(service.get("port", "?")))
-                state = _terminal_text(str(service.get("state", "unknown")))
+                service_nodes.append(_TopologyTree(("NO SERVICES DISCOVERED",)))
+            for service_id, service in host_services:
+                protocol = str(service.get("protocol", "unknown"))
+                port = str(service.get("port", "?"))
+                state = str(service.get("state", "unknown")).upper()
                 product = service.get("product") or service.get("name") or "unknown service"
                 version = f" {service['version']}" if service.get("version") else ""
-                lines.append(
-                    f"{host_prefix}+-- [SERVICE] {protocol}/{port} {state} "
-                    f"{_terminal_text(str(product))}{_terminal_text(version)} "
-                    f"<{_terminal_text(service_id)}>"
-                )
-
+                finding_nodes: list[_TopologyTree] = []
                 matches = service_matches.get(service_id, [])
                 if not matches:
-                    lines.append(f"{service_prefix}+-- (no CVE candidates)")
-                    continue
+                    finding_nodes.append(_TopologyTree(("NO CVE CANDIDATES",)))
                 for match in matches:
                     cve_id = _required_text(match.get("cve_id"), "match cve_id")
                     vulnerability = vulnerabilities[cve_id]
                     score = vulnerability.get("cvss_score")
                     score_text = "n/a" if score is None else str(score)
-                    confidence = _terminal_text(str(match.get("confidence", "unknown")))
-                    lines.append(
-                        f"{service_prefix}+-- [CVE] {_terminal_text(cve_id)} "
-                        f"score={_terminal_text(score_text)} confidence={confidence}"
+                    confidence = str(match.get("confidence", "unknown")).upper()
+                    finding_nodes.append(
+                        _TopologyTree(
+                            (
+                                cve_id,
+                                f"CVSS {score_text} | {confidence}",
+                            )
+                        )
                     )
+                service_nodes.append(
+                    _TopologyTree(
+                        (
+                            f"SERVICE {protocol}/{port} {state}",
+                            f"{product}{version}",
+                        ),
+                        tuple(finding_nodes),
+                    )
+                )
+            host_nodes.append(_TopologyTree(host_labels, tuple(service_nodes)))
+
+        if vantage == ENTRY_NODE_ID:
+            root_labels = ("SERVER / SCANNER", ENTRY_NODE_ID)
+        else:
+            root_labels = ("SERVER / VANTAGE", vantage.removeprefix("host:"))
+        if not host_nodes:
+            host_nodes.append(_TopologyTree(("NO HOSTS DISCOVERED",)))
+        rendered = _render_topology_tree(
+            _TopologyTree(root_labels, tuple(host_nodes))
+        )
+        if document_index:
+            lines.append("")
+        lines.extend(line.rstrip() for line in rendered.lines)
 
     host_count = sum(
         len(document.get("hosts", []))
@@ -695,6 +709,105 @@ def render_topology_ascii(scan_document: Any, cve_document: Any) -> str:
         f"Services: {service_count}  CVE candidates: {len(raw_matches)}"
     )
     return "\n".join(lines)
+
+
+def _render_topology_tree(tree: _TopologyTree) -> _RenderedTree:
+    box_lines = _topology_box(tree.labels)
+    box_width = len(box_lines[0])
+    if not tree.children:
+        return _RenderedTree(tuple(box_lines), box_width, box_width // 2)
+
+    rendered_children = tuple(_render_topology_tree(child) for child in tree.children)
+    if len(rendered_children) == 1:
+        child = rendered_children[0]
+        root_center = max(box_width // 2, child.root_center)
+        box_left = root_center - box_width // 2
+        child_left = root_center - child.root_center
+        width = max(box_left + box_width, child_left + child.width)
+        lines = [(" " * box_left + line).ljust(width) for line in box_lines]
+        connector = [" "] * width
+        connector[root_center] = "|"
+        lines.append("".join(connector))
+        lines.extend(
+            (" " * child_left + line.ljust(child.width)).ljust(width)
+            for line in child.lines
+        )
+        return _RenderedTree(tuple(lines), width, root_center)
+
+    gap = 4
+    children_width = sum(child.width for child in rendered_children) + gap * (
+        len(rendered_children) - 1
+    )
+    width = max(box_width, children_width)
+    box_left = (width - box_width) // 2
+    child_left = (width - children_width) // 2
+    root_center = box_left + box_width // 2
+
+    lines = [
+        (" " * box_left + line).ljust(width)
+        for line in box_lines
+    ]
+    child_offsets: list[int] = []
+    offset = child_left
+    for child in rendered_children:
+        child_offsets.append(offset)
+        offset += child.width + gap
+    child_centers = [
+        offset + child.root_center
+        for offset, child in zip(child_offsets, rendered_children, strict=True)
+    ]
+
+    upper = [" "] * width
+    upper[root_center] = "|"
+    lines.append("".join(upper))
+
+    branch = [" "] * width
+    left = min(root_center, *child_centers)
+    right = max(root_center, *child_centers)
+    for column in range(left, right + 1):
+        branch[column] = "-"
+    for column in (root_center, *child_centers):
+        branch[column] = "+"
+    lines.append("".join(branch))
+
+    lower = [" "] * width
+    for center in child_centers:
+        lower[center] = "|"
+    lines.append("".join(lower))
+
+    child_height = max(len(child.lines) for child in rendered_children)
+    for row_index in range(child_height):
+        row = [" "] * width
+        for offset, child in zip(child_offsets, rendered_children, strict=True):
+            if row_index >= len(child.lines):
+                continue
+            child_line = child.lines[row_index].ljust(child.width)
+            row[offset : offset + child.width] = child_line
+        lines.append("".join(row))
+
+    return _RenderedTree(tuple(lines), width, root_center)
+
+
+def _topology_box(labels: tuple[str, ...]) -> list[str]:
+    content: list[str] = []
+    for label in labels:
+        clean_label = _terminal_text(str(label))
+        content.extend(
+            textwrap.wrap(
+                clean_label,
+                width=30,
+                break_long_words=True,
+                break_on_hyphens=False,
+            )
+            or [""]
+        )
+    content_width = max(len(line) for line in content)
+    border = "+" + "-" * (content_width + 2) + "+"
+    return [
+        border,
+        *(f"| {line.center(content_width)} |" for line in content),
+        border,
+    ]
 
 
 def render_path_ascii(graph: AttackGraph, path: ShortestPath) -> str:

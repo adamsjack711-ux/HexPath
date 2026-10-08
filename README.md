@@ -136,7 +136,9 @@ hexpath graph path \
   --target host:2001:db8:1::10
 ```
 
-The terminal output uses ASCII branches and arrows. Pass `--json` to `graph build` or `graph path` when another program needs machine-readable output.
+The terminal output uses ASCII branches and arrows. Branches are drawn at most
+100 levels deep; a longer route is marked `(continued below: depth limit
+reached)` and its remainder is drawn as a separate tree further down. Pass `--json` to `graph build` or `graph path` when another program needs machine-readable output.
 
 Each scan contributes reachability only from its recorded vantage. A path can
 therefore continue from the entry point, through a candidate service finding to

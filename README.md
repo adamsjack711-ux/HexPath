@@ -108,6 +108,14 @@ hexpath cve package --ecosystem PyPI --package Jinja2 --version 2.4.1
 
 Set `NVD_API_KEY` in the environment when an NVD API key is available. HexPath sends it through the required request header and does not include it in results.
 
+NVD limits how often it can be queried, so HexPath spaces out its requests:
+6 seconds apart without an API key, 0.6 seconds with one. A scan with ten
+unique CPEs therefore takes about a minute without a key. If NVD still
+throttles a request (HTTP 403, 429 or 503), HexPath waits and retries up to
+three times, honouring NVD's `Retry-After` header when present, before
+recording that CPE as an incomplete lookup. CPEs with more results than fit
+in one NVD response are fetched page by page.
+
 CPE findings are candidate matches. Nmap identifies the product and version remotely, and NVD identifies applicable CVEs, but a vendor may have backported a patch without changing the reported version. HexPath therefore records these links as inferred, medium-confidence evidence until patch status is validated.
 
 ## Attack graph

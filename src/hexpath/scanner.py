@@ -256,6 +256,17 @@ def _parse_services(
         service_attributes: dict[str, Any] = (
             service_element.attrib if service_element is not None else {}
         )
+        cpes = (
+            tuple(
+                dict.fromkeys(
+                    element.text.strip()
+                    for element in service_element.findall("cpe")
+                    if element.text and element.text.strip()
+                )
+            )
+            if service_element is not None
+            else ()
+        )
         service_evidence = Evidence(
             source="nmap",
             summary=(
@@ -278,6 +289,7 @@ def _parse_services(
                 name=service_attributes.get("name"),
                 product=service_attributes.get("product"),
                 version=service_attributes.get("version"),
+                cpes=cpes,
                 evidence=(service_evidence,),
             )
         )

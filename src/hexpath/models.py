@@ -13,6 +13,7 @@ from uuid import uuid4
 
 
 _CVE_PATTERN = re.compile(r"^CVE-[0-9]{4}-[0-9]{4,}$")
+_CPE_PREFIXES = ("cpe:/", "cpe:2.3:")
 
 
 class ModelError(ValueError):
@@ -85,6 +86,13 @@ def _normalize_cve_id(value: str) -> str:
     if not _CVE_PATTERN.fullmatch(cve_id):
         raise ModelError("cve_id must use the format CVE-YYYY-NNNN")
     return cve_id
+
+
+def _normalize_cpe(value: str) -> str:
+    cpe = _require_text(value, "cpe")
+    if not cpe.startswith(_CPE_PREFIXES):
+        raise ModelError("cpe must use CPE 2.2 URI or CPE 2.3 formatted syntax")
+    return cpe
 
 
 def _require_unique(values: tuple[str, ...], record_name: str) -> None:
@@ -170,6 +178,7 @@ class Service:
     name: str | None = None
     product: str | None = None
     version: str | None = None
+    cpes: tuple[str, ...] = ()
     evidence: tuple[Evidence, ...] = ()
 
     def __post_init__(self) -> None:
@@ -192,6 +201,10 @@ class Service:
             value = getattr(self, field_name)
             if value is not None:
                 object.__setattr__(self, field_name, _require_text(value, field_name))
+        cpes = tuple(_normalize_cpe(cpe) for cpe in self.cpes)
+        if len(cpes) != len(set(cpes)):
+            raise ModelError("service contains duplicate CPE records")
+        object.__setattr__(self, "cpes", cpes)
         object.__setattr__(self, "evidence", tuple(self.evidence))
 
     @property
@@ -208,6 +221,7 @@ class Service:
             "name": self.name,
             "product": self.product,
             "version": self.version,
+            "cpes": list(self.cpes),
             "evidence": [item.to_dict() for item in self.evidence],
         }
 

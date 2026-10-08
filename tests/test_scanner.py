@@ -135,6 +135,10 @@ class NmapXmlParserTests(unittest.TestCase):
         self.assertEqual(result.services[0].port, 22)
         self.assertEqual(result.services[0].product, "OpenSSH")
         self.assertEqual(result.services[0].version, "9.6")
+        self.assertEqual(
+            result.services[0].cpes,
+            ("cpe:/a:openbsd:openssh:9.6",),
+        )
         self.assertEqual(result.services[1].state, ServiceState.OPEN_FILTERED)
 
         document = json.loads(result.to_json())

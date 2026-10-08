@@ -9,7 +9,9 @@
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack"/>
-        <service name="ssh" product="OpenSSH" version="9.6"/>
+        <service name="ssh" product="OpenSSH" version="9.6">
+          <cpe>cpe:/a:openbsd:openssh:9.6</cpe>
+        </service>
       </port>
       <port protocol="tcp" portid="80">
         <state state="closed" reason="conn-refused"/>
@@ -17,7 +19,9 @@
       </port>
       <port protocol="udp" portid="5353">
         <state state="open|filtered" reason="no-response"/>
-        <service name="mdns"/>
+        <service name="mdns">
+          <cpe>cpe:2.3:a:example:mdns:1.0:*:*:*:*:*:*:*</cpe>
+        </service>
       </port>
     </ports>
   </host>

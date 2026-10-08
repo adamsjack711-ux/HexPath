@@ -12,6 +12,14 @@ from unittest.mock import patch
 
 from hexpath.cli import main
 from hexpath.scanner import NmapScanResult
+from hexpath.vulnerabilities import (
+    CpeIdentity,
+    CpeVulnerabilityResult,
+    OsvAdvisory,
+    PackageIdentity,
+    PackageVulnerabilityResult,
+    ScanVulnerabilityResult,
+)
 
 
 class ScanCliTests(unittest.TestCase):
@@ -80,6 +88,117 @@ class ScanCliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 2)
         self.assertIn("outside authorized scope", errors.getvalue())
+
+
+class CveCliTests(unittest.TestCase):
+    @patch("hexpath.cli.check_package")
+    def test_package_check_prints_provider_result(self, check_mock) -> None:
+        package = PackageIdentity(ecosystem="PyPI", name="jinja2", version="2.4.1")
+        check_mock.return_value = PackageVulnerabilityResult(
+            package=package,
+            completed=True,
+            advisories=(
+                OsvAdvisory(
+                    advisory_id="PYSEC-2021-66",
+                    aliases=("CVE-2020-28493",),
+                    summary="Example OSV result.",
+                ),
+            ),
+        )
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(
+                [
+                    "cve",
+                    "package",
+                    "--ecosystem",
+                    "PyPI",
+                    "--package",
+                    "jinja2",
+                    "--version",
+                    "2.4.1",
+                ]
+            )
+
+        document = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(document["status"], "vulnerable")
+        self.assertEqual(document["vulnerabilities"][0]["id"], "CVE-2020-28493")
+
+    @patch("hexpath.cli.check_package")
+    def test_package_check_returns_failure_for_unknown_coverage(self, check_mock) -> None:
+        package = PackageIdentity(ecosystem="npm", name="demo", version="1.0.0")
+        check_mock.return_value = PackageVulnerabilityResult(
+            package=package,
+            completed=False,
+            error="OSV request timed out",
+        )
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(
+                [
+                    "cve",
+                    "package",
+                    "--ecosystem",
+                    "npm",
+                    "--package",
+                    "demo",
+                    "--version",
+                    "1.0.0",
+                ]
+            )
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(json.loads(output.getvalue())["status"], "unknown")
+
+    @patch("hexpath.cli.check_cpe")
+    def test_cpe_check_prints_nvd_result(self, check_mock) -> None:
+        cpe = CpeIdentity("cpe:/a:openbsd:openssh:9.6")
+        check_mock.return_value = CpeVulnerabilityResult(
+            cpe=cpe,
+            completed=True,
+            vulnerabilities=(),
+        )
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(
+                [
+                    "cve",
+                    "cpe",
+                    "--cpe",
+                    "cpe:/a:openbsd:openssh:9.6",
+                ]
+            )
+
+        document = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(document["source"], "NVD")
+        self.assertEqual(document["status"], "clean")
+        self.assertEqual(document["cpe"], "cpe:2.3:a:openbsd:openssh:9.6:*:*:*:*:*:*:*")
+
+    @patch("hexpath.cli.check_scan_document")
+    def test_scan_check_reads_normalized_scan_json(self, check_mock) -> None:
+        check_mock.return_value = ScanVulnerabilityResult(
+            checks=(),
+            vulnerabilities=(),
+            matches=(),
+            service_count=0,
+        )
+        temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+        input_path = Path(temporary_directory.name) / "scan.json"
+        input_path.write_text('{"hosts": [], "services": []}', encoding="utf-8")
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(["cve", "scan", "--input", str(input_path)])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(json.loads(output.getvalue())["status"], "clean")
+        check_mock.assert_called_once()
 
 
 if __name__ == "__main__":

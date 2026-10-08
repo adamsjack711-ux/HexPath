@@ -51,6 +51,7 @@ def sample_records() -> tuple[
         name="ssh",
         product="OpenSSH",
         version="9.6",
+        cpes=("cpe:/a:openbsd:openssh:9.6",),
         evidence=(evidence,),
     )
     vulnerability = Vulnerability(
@@ -102,6 +103,7 @@ class HostAndServiceTests(unittest.TestCase):
             service.record_id,
             "service:[2001:db8:1::10]:tcp:22",
         )
+        self.assertEqual(service.cpes, ("cpe:/a:openbsd:openssh:9.6",))
 
     def test_service_rejects_invalid_port(self) -> None:
         with self.assertRaisesRegex(ModelError, "between 1 and 65535"):

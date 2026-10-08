@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
+import json
+import os
+from pathlib import Path
 import shlex
 import sys
 
@@ -15,6 +18,16 @@ from hexpath.scanner import (
     run_nmap,
 )
 from hexpath.scope import Scope, ScopeError
+from hexpath.vulnerabilities import (
+    CpeIdentity,
+    NvdClient,
+    OsvClient,
+    PackageIdentity,
+    VulnerabilityError,
+    check_cpe,
+    check_package,
+    check_scan_document,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -67,6 +80,55 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument("targets", nargs="+", help="authorized IPv6 addresses or CIDRs")
 
+    cve_parser = subcommands.add_parser(
+        "cve",
+        help="check exact software identities for known vulnerabilities",
+    )
+    cve_commands = cve_parser.add_subparsers(dest="cve_command", required=True)
+    package_parser = cve_commands.add_parser(
+        "package",
+        help="query OSV for an exact package and version",
+    )
+    package_parser.add_argument(
+        "--ecosystem",
+        required=True,
+        help="OSV ecosystem such as PyPI or npm",
+    )
+    package_parser.add_argument("--package", required=True, help="package name")
+    package_parser.add_argument("--version", required=True, help="exact version")
+    package_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=15,
+        help="maximum OSV request time in seconds",
+    )
+    cpe_parser = cve_commands.add_parser(
+        "cpe",
+        help="query NVD for an exact service CPE",
+    )
+    cpe_parser.add_argument("--cpe", required=True, help="CPE 2.2 or 2.3 name")
+    cpe_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=30,
+        help="maximum NVD request time in seconds",
+    )
+    scan_cve_parser = cve_commands.add_parser(
+        "scan",
+        help="query NVD for every CPE in a saved HexPath scan",
+    )
+    scan_cve_parser.add_argument(
+        "--input",
+        required=True,
+        help="scan JSON path, or - to read standard input",
+    )
+    scan_cve_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=30,
+        help="maximum time for each NVD request in seconds",
+    )
+
     return parser
 
 
@@ -93,7 +155,49 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = parse_nmap_xml(xml_output, reference="live-nmap")
             print(result.to_json())
             return 0
-    except (ScopeError, ScannerError) as error:
+        if args.command == "cve" and args.cve_command == "package":
+            package = PackageIdentity(
+                ecosystem=args.ecosystem,
+                name=args.package,
+                version=args.version,
+            )
+            result = check_package(
+                package,
+                client=OsvClient(timeout_seconds=args.timeout),
+            )
+            print(result.to_json())
+            return 0 if result.completed else 2
+        if args.command == "cve" and args.cve_command == "cpe":
+            cpe = CpeIdentity(args.cpe)
+            result = check_cpe(
+                cpe,
+                client=NvdClient(
+                    timeout_seconds=args.timeout,
+                    api_key=os.environ.get("NVD_API_KEY"),
+                ),
+            )
+            print(result.to_json())
+            return 0 if result.completed else 2
+        if args.command == "cve" and args.cve_command == "scan":
+            try:
+                raw_document = (
+                    sys.stdin.read()
+                    if args.input == "-"
+                    else Path(args.input).read_text(encoding="utf-8")
+                )
+                document = json.loads(raw_document)
+            except (OSError, ValueError) as error:
+                raise VulnerabilityError(f"could not read scan JSON: {error}") from error
+            result = check_scan_document(
+                document,
+                client=NvdClient(
+                    timeout_seconds=args.timeout,
+                    api_key=os.environ.get("NVD_API_KEY"),
+                ),
+            )
+            print(result.to_json())
+            return 0 if result.completed else 2
+    except (ScopeError, ScannerError, VulnerabilityError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
 

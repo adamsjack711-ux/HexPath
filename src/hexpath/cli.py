@@ -186,8 +186,7 @@ def build_parser() -> argparse.ArgumentParser:
     graph_path_parser.add_argument("--graph", required=True, help="graph JSON path")
     graph_path_parser.add_argument(
         "--source",
-        default=ENTRY_NODE_ID,
-        help="source node identifier",
+        help="source node identifier (default: the graph's entry node)",
     )
     graph_path_parser.add_argument("--target", required=True, help="target node identifier")
     graph_path_parser.add_argument(
@@ -299,13 +298,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "graph" and args.graph_command == "path":
             graph = AttackGraph.from_dict(_read_json_document(args.graph, "graph"))
-            path = graph.shortest_path(args.source, args.target)
+            source = args.source or graph.default_source()
+            path = graph.shortest_path(source, args.target)
             if path is None:
                 if args.json:
                     print(
                         json.dumps(
                             {
-                                "source": args.source,
+                                "source": source,
                                 "target": args.target,
                                 "path": None,
                             },
@@ -314,7 +314,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         )
                     )
                 else:
-                    print(f"No directed path from {args.source} to {args.target}.")
+                    print(f"No directed path from {source} to {args.target}.")
                 return 1
             print(path.to_json() if args.json else render_path_ascii(graph, path))
             return 0

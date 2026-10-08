@@ -321,6 +321,86 @@ class GraphCliTests(unittest.TestCase):
         self.assertEqual(document["nodes"], ["entry:scanner", "host:target"])
         self.assertEqual(document["total_weight"], 2.5)
 
+    def _write_entry_graph(self, entry_ids: list[str]) -> Path:
+        graph_path = self.directory / "entry-graph.json"
+        evidence = [
+            {
+                "source": "test",
+                "summary": "test evidence",
+                "level": "observed",
+                "collected_at": "2026-10-08T18:30:00+00:00",
+                "reference": None,
+            }
+        ]
+        graph_path.write_text(
+            json.dumps(
+                {
+                    "nodes": [
+                        *(
+                            {"id": entry_id, "kind": "entry", "label": "entry"}
+                            for entry_id in entry_ids
+                        ),
+                        {"id": "host:target", "kind": "host", "label": "target"},
+                    ],
+                    "edges": [
+                        {
+                            "id": f"edge-{index}",
+                            "source": entry_id,
+                            "target": "host:target",
+                            "relationship": "transition",
+                            "weight": 2.5,
+                            "description": "test transition",
+                            "evidence": evidence,
+                        }
+                        for index, entry_id in enumerate(entry_ids)
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return graph_path
+
+    def test_path_defaults_to_custom_entry_node(self) -> None:
+        graph_path = self._write_entry_graph(["entry:kali"])
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(
+                [
+                    "graph",
+                    "path",
+                    "--graph",
+                    str(graph_path),
+                    "--target",
+                    "host:target",
+                    "--json",
+                ]
+            )
+
+        document = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(document["nodes"], ["entry:kali", "host:target"])
+
+    def test_path_requires_source_when_graph_has_several_entries(self) -> None:
+        graph_path = self._write_entry_graph(["entry:kali", "entry:vpn"])
+        errors = StringIO()
+
+        with redirect_stdout(StringIO()), redirect_stderr(errors):
+            exit_code = main(
+                [
+                    "graph",
+                    "path",
+                    "--graph",
+                    str(graph_path),
+                    "--target",
+                    "host:target",
+                ]
+            )
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("several entry nodes", errors.getvalue())
+        self.assertIn("entry:kali, entry:vpn", errors.getvalue())
+
     def test_show_renders_ascii_graph(self) -> None:
         graph_path = self.directory / "graph.json"
         graph_path.write_text(

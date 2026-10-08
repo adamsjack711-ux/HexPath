@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 from hexpath.vulnerabilities import (
     CpeIdentity,
@@ -155,7 +156,7 @@ class OsvClientTests(unittest.TestCase):
         result = check_package(self.package, client=client)
 
         self.assertEqual(result.status, VulnerabilityStatus.UNKNOWN)
-        self.assertIn("size limit", result.error)
+        self.assertEqual(result.error, "OSV response exceeded the size limit")
 
 
 class PackageVulnerabilityResultTests(unittest.TestCase):
@@ -236,6 +237,17 @@ class NvdClientTests(unittest.TestCase):
         self.assertEqual(result.status, VulnerabilityStatus.UNKNOWN)
         self.assertIn("pagination", result.error)
 
+    @patch("hexpath.vulnerabilities.urlopen")
+    def test_default_transport_errors_name_nvd(self, open_mock) -> None:
+        open_mock.side_effect = HTTPError(
+            "https://services.nvd.nist.gov/", 403, "Forbidden", {}, None
+        )
+
+        result = check_cpe(self.cpe, client=NvdClient())
+
+        self.assertEqual(result.status, VulnerabilityStatus.UNKNOWN)
+        self.assertEqual(result.error, "NVD returned HTTP 403")
+
 
 class ScanVulnerabilityTests(unittest.TestCase):
     def test_links_cpe_findings_to_services_and_reports_coverage_gap(self) -> None:
@@ -295,6 +307,73 @@ class ScanVulnerabilityTests(unittest.TestCase):
 
         self.assertTrue(result.completed)
         self.assertEqual(result.status, VulnerabilityStatus.CLEAN)
+
+    def test_unparseable_cpe_is_reported_without_aborting_other_checks(self) -> None:
+        queried: list[str] = []
+
+        def transport(request, _timeout, _limit):
+            queried.append(request.full_url)
+            return b'{"totalResults":0,"vulnerabilities":[]}'
+
+        document = {
+            "services": [
+                {
+                    "id": "service:[2001:db8::10]:tcp:22",
+                    "cpes": ["cpe:/a:openbsd:openssh:9.6"],
+                },
+                {
+                    "id": "service:[2001:db8::10]:tcp:8080",
+                    "cpes": ["cpe:/a:vendor:prod~uct:1.0"],
+                },
+            ]
+        }
+
+        result = check_scan_document(document, client=NvdClient(transport=transport))
+        report = result.to_dict()
+
+        self.assertEqual(len(queried), 1)
+        self.assertIn("openssh", queried[0])
+        self.assertFalse(result.completed)
+        self.assertEqual(result.status, VulnerabilityStatus.UNKNOWN)
+        self.assertEqual(result.unmatched_services, ())
+        self.assertEqual(report["coverage"]["invalid_cpes"], 1)
+        self.assertEqual(
+            report["invalid_cpes"][0]["service_id"],
+            "service:[2001:db8::10]:tcp:8080",
+        )
+        self.assertEqual(report["invalid_cpes"][0]["cpe"], "cpe:/a:vendor:prod~uct:1.0")
+        self.assertIn("CPE 2.3 format", report["invalid_cpes"][0]["error"])
+
+    def test_findings_still_reported_when_another_cpe_is_unparseable(self) -> None:
+        response = {
+            "totalResults": 1,
+            "vulnerabilities": [
+                {
+                    "cve": {
+                        "id": "CVE-2024-6387",
+                        "descriptions": [{"lang": "en", "value": "OpenSSH issue."}],
+                    }
+                }
+            ],
+        }
+        document = {
+            "services": [
+                {
+                    "id": "service:[2001:db8::10]:tcp:22",
+                    "cpes": ["cpe:/a:openbsd:openssh:9.6", "not-a-cpe"],
+                }
+            ]
+        }
+        client = NvdClient(
+            transport=lambda _request, _timeout, _limit: json.dumps(response).encode()
+        )
+
+        result = check_scan_document(document, client=client)
+
+        self.assertEqual(result.status, VulnerabilityStatus.VULNERABLE)
+        self.assertFalse(result.completed)
+        self.assertEqual(result.matches[0].cve_id, "CVE-2024-6387")
+        self.assertEqual(result.invalid_cpes[0].cpe, "not-a-cpe")
 
     def test_multiple_scans_deduplicate_services_and_cpe_queries(self) -> None:
         calls = []

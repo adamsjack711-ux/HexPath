@@ -185,15 +185,17 @@ class CveCliTests(unittest.TestCase):
     @patch("hexpath.cli.check_scan_documents")
     def test_scan_check_reads_normalized_scan_json(self, check_mock) -> None:
         check_mock.return_value = ScanVulnerabilityResult(
-            checks=(),
+            checks=(CpeVulnerabilityResult(cpe=CpeIdentity("cpe:/a:x:y:1"), completed=True),),
             vulnerabilities=(),
             matches=(),
-            service_count=0,
+            service_count=1,
         )
         temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(temporary_directory.cleanup)
         input_path = Path(temporary_directory.name) / "scan.json"
-        input_path.write_text('{"hosts": [], "services": []}', encoding="utf-8")
+        input_path.write_text(
+            '{"hosts": [], "services": [{"id": "s1", "cpes": []}]}', encoding="utf-8"
+        )
         output = StringIO()
 
         with redirect_stdout(output):
@@ -207,10 +209,10 @@ class CveCliTests(unittest.TestCase):
     @patch("hexpath.cli.check_scan_documents")
     def test_scan_check_accepts_multiple_vantage_files(self, check_mock) -> None:
         check_mock.return_value = ScanVulnerabilityResult(
-            checks=(),
+            checks=(CpeVulnerabilityResult(cpe=CpeIdentity("cpe:/a:x:y:1"), completed=True),),
             vulnerabilities=(),
             matches=(),
-            service_count=0,
+            service_count=1,
         )
         temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(temporary_directory.cleanup)

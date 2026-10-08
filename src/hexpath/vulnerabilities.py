@@ -284,6 +284,10 @@ class ScanVulnerabilityResult:
 
     @property
     def completed(self) -> bool:
+        # A scan with no services means nothing was checked, so the lookup is
+        # not a completed "clean" result -- it is an absence of coverage.
+        if self.service_count == 0:
+            return False
         return (
             not self.unmatched_services
             and not self.invalid_cpes

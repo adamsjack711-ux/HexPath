@@ -518,6 +518,23 @@ class ScanVulnerabilityTests(unittest.TestCase):
         self.assertTrue(result.completed)
         self.assertEqual(result.status, VulnerabilityStatus.CLEAN)
 
+    def test_scan_with_no_services_is_unknown_not_clean(self) -> None:
+        queried: list[str] = []
+
+        def transport(request, _timeout, _limit):
+            queried.append(request.full_url)
+            return b'{"totalResults":0,"vulnerabilities":[]}'
+
+        result = check_scan_document(
+            {"hosts": [{"id": "host:2001:db8::10"}], "services": []},
+            client=NvdClient(transport=transport),
+        )
+
+        self.assertEqual(queried, [])
+        self.assertEqual(result.service_count, 0)
+        self.assertFalse(result.completed)
+        self.assertEqual(result.status, VulnerabilityStatus.UNKNOWN)
+
     def test_unparseable_cpe_is_reported_without_aborting_other_checks(self) -> None:
         queried: list[str] = []
 

@@ -63,6 +63,37 @@ class NmapCommandTests(unittest.TestCase):
         self.assertEqual(command.targets, ("2001:db8:1::/80",))
         self.assertIn("--version-light", command.arguments)
 
+    def test_can_skip_host_discovery_for_filtered_targets(self) -> None:
+        command = build_nmap_command(
+            self.scope,
+            ["2001:db8:1::10"],
+            ScanProfile.SERVICES,
+            skip_discovery=True,
+        )
+
+        self.assertIn("-Pn", command.arguments)
+        self.assertIn("-sV", command.arguments)
+
+    def test_accepts_nmap_style_service_port_selection(self) -> None:
+        command = build_nmap_command(
+            self.scope,
+            ["2001:db8:1::10"],
+            ScanProfile.SERVICES,
+            ports="22,80,443,8000-8100",
+        )
+
+        port_index = command.arguments.index("-p")
+        self.assertEqual(command.arguments[port_index + 1], "22,80,443,8000-8100")
+
+    def test_rejects_invalid_port_selection(self) -> None:
+        with self.assertRaisesRegex(ScannerError, "ports"):
+            build_nmap_command(
+                self.scope,
+                ["2001:db8:1::10"],
+                ScanProfile.SERVICES,
+                ports="--script=unsafe",
+            )
+
     def test_rejects_target_that_is_broader_than_scope(self) -> None:
         with self.assertRaises(TargetOutsideScopeError):
             build_nmap_command(
@@ -167,6 +198,26 @@ class NmapXmlParserTests(unittest.TestCase):
     def test_rejects_non_nmap_document(self) -> None:
         with self.assertRaisesRegex(NmapParseError, "nmaprun"):
             parse_nmap_xml("<report/>")
+
+    def test_preserves_filtered_service_in_complete_topology(self) -> None:
+        result = parse_nmap_xml(
+            """<nmaprun start="1791509400">
+            <host>
+              <status state="up" reason="user-set"/>
+              <address addr="2001:db8::10" addrtype="ipv6"/>
+              <ports>
+                <port protocol="tcp" portid="22">
+                  <state state="filtered" reason="no-response"/>
+                  <service name="ssh"/>
+                </port>
+              </ports>
+            </host>
+            </nmaprun>"""
+        )
+
+        self.assertEqual(len(result.services), 1)
+        self.assertEqual(result.services[0].port, 22)
+        self.assertEqual(result.services[0].state, ServiceState.FILTERED)
 
 
 if __name__ == "__main__":

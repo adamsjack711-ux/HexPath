@@ -80,6 +80,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="enable service/version detection (the default)",
     )
     assess_parser.add_argument(
+        "-Pn",
+        dest="skip_discovery",
+        action="store_true",
+        help="skip host discovery and treat targets as online",
+    )
+    assess_parser.add_argument(
+        "-p",
+        "--ports",
+        help="ports or ranges to scan, such as 22,80,443 or 1-1024",
+    )
+    assess_parser.add_argument(
         "--from",
         dest="vantage",
         help="IPv6 host where this scan is being run",
@@ -152,6 +163,13 @@ def build_parser() -> argparse.ArgumentParser:
         choices=[profile.value for profile in ScanProfile],
         default=ScanProfile.DISCOVERY.value,
     )
+    plan_parser.add_argument(
+        "-Pn",
+        dest="skip_discovery",
+        action="store_true",
+        help="skip host discovery and treat targets as online",
+    )
+    plan_parser.add_argument("-p", "--ports", help="service ports to scan")
     plan_parser.add_argument("targets", nargs="+", help="authorized IPv6 addresses or CIDRs")
 
     run_parser = scan_commands.add_parser(
@@ -170,6 +188,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=300,
         help="maximum Nmap runtime in seconds",
     )
+    run_parser.add_argument(
+        "-Pn",
+        dest="skip_discovery",
+        action="store_true",
+        help="skip host discovery and treat targets as online",
+    )
+    run_parser.add_argument("-p", "--ports", help="service ports to scan")
     run_parser.add_argument(
         "--vantage",
         default=ENTRY_NODE_ID,
@@ -369,7 +394,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             if raw_vantage != ENTRY_NODE_ID and not raw_vantage.startswith("host:"):
                 raw_vantage = f"host:{raw_vantage}"
             vantage = require_authorized_vantage(scope, raw_vantage)
-            command = build_nmap_command(scope, args.targets, ScanProfile.SERVICES)
+            command = build_nmap_command(
+                scope,
+                args.targets,
+                ScanProfile.SERVICES,
+                skip_discovery=args.skip_discovery,
+                ports=args.ports,
+            )
             xml_output = run_nmap(command, timeout_seconds=args.timeout)
             scan_result = parse_nmap_xml(
                 xml_output,
@@ -433,13 +464,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "scan" and args.scan_command == "plan":
             scope = Scope.from_json_file(args.scope)
-            command = build_nmap_command(scope, args.targets, args.profile)
+            command = build_nmap_command(
+                scope,
+                args.targets,
+                args.profile,
+                skip_discovery=args.skip_discovery,
+                ports=args.ports,
+            )
             print(shlex.join(command.arguments))
             return 0
         if args.command == "scan" and args.scan_command == "run":
             scope = Scope.from_json_file(args.scope)
             vantage = require_authorized_vantage(scope, args.vantage)
-            command = build_nmap_command(scope, args.targets, args.profile)
+            command = build_nmap_command(
+                scope,
+                args.targets,
+                args.profile,
+                skip_discovery=args.skip_discovery,
+                ports=args.ports,
+            )
             xml_output = run_nmap(command, timeout_seconds=args.timeout)
             result = parse_nmap_xml(
                 xml_output,

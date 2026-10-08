@@ -83,6 +83,9 @@ class QuickCliTests(unittest.TestCase):
                     str(self.scope_path),
                     "-6",
                     "-sV",
+                    "-Pn",
+                    "-p",
+                    "22,443",
                     "-oJ",
                     str(result_path),
                     "::1",
@@ -98,6 +101,8 @@ class QuickCliTests(unittest.TestCase):
         self.assertEqual(result["scan"]["vantage"], "entry:scanner")
         self.assertEqual(result["graph"]["nodes"][0]["id"], "entry:scanner")
         self.assertIn("-sV", run_mock.call_args.args[0].arguments)
+        self.assertIn("-Pn", run_mock.call_args.args[0].arguments)
+        self.assertIn("22,443", run_mock.call_args.args[0].arguments)
         parse_mock.assert_called_once_with(
             "<nmaprun/>",
             reference="live-nmap",

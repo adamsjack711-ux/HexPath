@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from ipaddress import IPv6Address, ip_address
 import json
+import re
 import shutil
 import subprocess
 from typing import Any
@@ -86,6 +87,8 @@ def build_nmap_command(
     profile: ScanProfile | str,
     *,
     executable: str = "nmap",
+    skip_discovery: bool = False,
+    ports: str | None = None,
 ) -> NmapCommand:
     """Validate targets against scope and construct a conservative command."""
     if not targets:
@@ -109,15 +112,42 @@ def build_nmap_command(
         "-",
     )
     if selected_profile is ScanProfile.DISCOVERY:
+        if ports is not None:
+            raise ScannerError("ports can be selected only for a service scan")
         profile_arguments = ("-sn",)
     else:
         profile_arguments = ("-sT", "-sV", "--version-light")
 
+    discovery_arguments = ("-Pn",) if skip_discovery else ()
+    port_arguments = ("-p", _validate_ports(ports)) if ports is not None else ()
     return NmapCommand(
-        arguments=common_arguments + profile_arguments + authorized_targets,
+        arguments=(
+            common_arguments
+            + discovery_arguments
+            + port_arguments
+            + profile_arguments
+            + authorized_targets
+        ),
         targets=authorized_targets,
         profile=selected_profile,
     )
+
+
+def _validate_ports(value: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9][0-9,-]*", value):
+        raise ScannerError("ports must be numbers or ranges such as 22,80,443 or 1-1024")
+    for item in value.split(","):
+        if not item:
+            raise ScannerError("port list cannot contain empty entries")
+        bounds = item.split("-")
+        if len(bounds) > 2:
+            raise ScannerError(f"invalid port range {item!r}")
+        numbers = [int(bound) for bound in bounds]
+        if any(number < 1 or number > 65535 for number in numbers):
+            raise ScannerError("ports must be between 1 and 65535")
+        if len(numbers) == 2 and numbers[0] > numbers[1]:
+            raise ScannerError(f"invalid descending port range {item!r}")
+    return value
 
 
 def run_nmap(command: NmapCommand, *, timeout_seconds: int = 300) -> str:
@@ -271,7 +301,11 @@ def _parse_services(
         if state_element is None:
             continue
         raw_state = state_element.attrib.get("state")
-        if raw_state not in {ServiceState.OPEN.value, ServiceState.OPEN_FILTERED.value}:
+        if raw_state not in {
+            ServiceState.OPEN.value,
+            ServiceState.OPEN_FILTERED.value,
+            ServiceState.FILTERED.value,
+        }:
             continue
 
         try:

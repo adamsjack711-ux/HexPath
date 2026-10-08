@@ -68,8 +68,13 @@ That command automatically:
 Familiar Nmap-style flags are also accepted:
 
 ```sh
-hexpath -6 -sV 2001:db8:1::10
+hexpath -6 -sV -Pn -p 22,443 2001:db8:1::10
 ```
+
+Use `-Pn` when ICMP or another firewall rule prevents Nmap host discovery even
+though the target is reachable.
+Use `-p` to scan specific ports or ranges when a smaller targeted assessment is
+appropriate.
 
 Save the complete scan, CVE, and graph data when needed:
 

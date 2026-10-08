@@ -237,6 +237,18 @@ class CpeVulnerabilityResult:
 
 
 @dataclass(frozen=True, slots=True)
+class InvalidCpe:
+    """A service CPE that could not be normalized and was therefore not checked."""
+
+    service_id: str
+    cpe: str
+    error: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"service_id": self.service_id, "cpe": self.cpe, "error": self.error}
+
+
+@dataclass(frozen=True, slots=True)
 class ScanVulnerabilityResult:
     """Aggregate CVE candidates and coverage for normalized scan services."""
 
@@ -245,10 +257,15 @@ class ScanVulnerabilityResult:
     matches: tuple[VulnerabilityMatch, ...]
     service_count: int
     unmatched_services: tuple[str, ...] = ()
+    invalid_cpes: tuple[InvalidCpe, ...] = ()
 
     @property
     def completed(self) -> bool:
-        return not self.unmatched_services and all(check.completed for check in self.checks)
+        return (
+            not self.unmatched_services
+            and not self.invalid_cpes
+            and all(check.completed for check in self.checks)
+        )
 
     @property
     def status(self) -> VulnerabilityStatus:
@@ -269,8 +286,10 @@ class ScanVulnerabilityResult:
                 "services_without_cpe": len(self.unmatched_services),
                 "cpe_checks": len(self.checks),
                 "completed_cpe_checks": sum(check.completed for check in self.checks),
+                "invalid_cpes": len(self.invalid_cpes),
             },
             "unmatched_services": list(self.unmatched_services),
+            "invalid_cpes": [item.to_dict() for item in self.invalid_cpes],
             "checks": [check.to_dict() for check in self.checks],
             "vulnerabilities": [item.to_dict() for item in self.vulnerabilities],
             "matches": [item.to_dict() for item in self.matches],
@@ -447,6 +466,7 @@ def check_scan_documents(
 
     cpe_services: dict[CpeIdentity, list[str]] = {}
     service_cpes: dict[str, list[CpeIdentity]] = {}
+    invalid_cpes: dict[tuple[str, str], InvalidCpe] = {}
     for document in documents:
         if not isinstance(document, dict) or not isinstance(
             document.get("services"), list
@@ -473,12 +493,22 @@ def check_scan_documents(
                 )
             identities = service_cpes.setdefault(service_id, [])
             for raw_cpe in raw_cpes:
-                identity = CpeIdentity(raw_cpe)
+                try:
+                    identity = CpeIdentity(raw_cpe)
+                except VulnerabilityError as error:
+                    invalid_cpes.setdefault(
+                        (service_id, raw_cpe),
+                        InvalidCpe(service_id=service_id, cpe=raw_cpe, error=str(error)),
+                    )
+                    continue
                 if identity not in identities:
                     identities.append(identity)
 
+    services_with_invalid_cpe = {item.service_id for item in invalid_cpes.values()}
     unmatched_services = [
-        service_id for service_id, identities in service_cpes.items() if not identities
+        service_id
+        for service_id, identities in service_cpes.items()
+        if not identities and service_id not in services_with_invalid_cpe
     ]
     for service_id, identities in service_cpes.items():
         for identity in identities:
@@ -525,6 +555,7 @@ def check_scan_documents(
         matches=tuple(matches.values()),
         service_count=len(service_cpes),
         unmatched_services=tuple(unmatched_services),
+        invalid_cpes=tuple(invalid_cpes.values()),
     )
 
 

@@ -83,6 +83,8 @@ hexpath cve scan \
 ```
 
 Repeated services and CPEs are deduplicated, so the same CPE is queried once.
+A CPE that cannot be converted for NVD is listed under `invalid_cpes` and the
+rest of the scan is still checked; the result is then marked incomplete.
 
 Check one Nmap CPE directly:
 

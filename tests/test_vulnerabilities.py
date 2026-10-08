@@ -308,6 +308,73 @@ class ScanVulnerabilityTests(unittest.TestCase):
         self.assertTrue(result.completed)
         self.assertEqual(result.status, VulnerabilityStatus.CLEAN)
 
+    def test_unparseable_cpe_is_reported_without_aborting_other_checks(self) -> None:
+        queried: list[str] = []
+
+        def transport(request, _timeout, _limit):
+            queried.append(request.full_url)
+            return b'{"totalResults":0,"vulnerabilities":[]}'
+
+        document = {
+            "services": [
+                {
+                    "id": "service:[2001:db8::10]:tcp:22",
+                    "cpes": ["cpe:/a:openbsd:openssh:9.6"],
+                },
+                {
+                    "id": "service:[2001:db8::10]:tcp:8080",
+                    "cpes": ["cpe:/a:vendor:prod~uct:1.0"],
+                },
+            ]
+        }
+
+        result = check_scan_document(document, client=NvdClient(transport=transport))
+        report = result.to_dict()
+
+        self.assertEqual(len(queried), 1)
+        self.assertIn("openssh", queried[0])
+        self.assertFalse(result.completed)
+        self.assertEqual(result.status, VulnerabilityStatus.UNKNOWN)
+        self.assertEqual(result.unmatched_services, ())
+        self.assertEqual(report["coverage"]["invalid_cpes"], 1)
+        self.assertEqual(
+            report["invalid_cpes"][0]["service_id"],
+            "service:[2001:db8::10]:tcp:8080",
+        )
+        self.assertEqual(report["invalid_cpes"][0]["cpe"], "cpe:/a:vendor:prod~uct:1.0")
+        self.assertIn("CPE 2.3 format", report["invalid_cpes"][0]["error"])
+
+    def test_findings_still_reported_when_another_cpe_is_unparseable(self) -> None:
+        response = {
+            "totalResults": 1,
+            "vulnerabilities": [
+                {
+                    "cve": {
+                        "id": "CVE-2024-6387",
+                        "descriptions": [{"lang": "en", "value": "OpenSSH issue."}],
+                    }
+                }
+            ],
+        }
+        document = {
+            "services": [
+                {
+                    "id": "service:[2001:db8::10]:tcp:22",
+                    "cpes": ["cpe:/a:openbsd:openssh:9.6", "not-a-cpe"],
+                }
+            ]
+        }
+        client = NvdClient(
+            transport=lambda _request, _timeout, _limit: json.dumps(response).encode()
+        )
+
+        result = check_scan_document(document, client=client)
+
+        self.assertEqual(result.status, VulnerabilityStatus.VULNERABLE)
+        self.assertFalse(result.completed)
+        self.assertEqual(result.matches[0].cve_id, "CVE-2024-6387")
+        self.assertEqual(result.invalid_cpes[0].cpe, "not-a-cpe")
+
     def test_multiple_scans_deduplicate_services_and_cpe_queries(self) -> None:
         calls = []
 

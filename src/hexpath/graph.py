@@ -156,6 +156,18 @@ class AttackGraph:
             if edge.target not in node_id_set:
                 raise GraphError(f"edge {edge.edge_id!r} has unknown target {edge.target!r}")
 
+    def default_source(self) -> str:
+        """Return the graph's only entry node, used when no source is given."""
+        entries = [node.node_id for node in self.nodes if node.kind is NodeKind.ENTRY]
+        if len(entries) == 1:
+            return entries[0]
+        if not entries:
+            raise GraphError("graph has no entry node; pass a source node explicitly")
+        raise GraphError(
+            "graph has several entry nodes; pass a source node explicitly: "
+            + ", ".join(sorted(entries))
+        )
+
     def shortest_path(self, source: str, target: str) -> ShortestPath | None:
         """Return the minimum-cost directed path using Dijkstra's algorithm."""
         node_ids = {node.node_id for node in self.nodes}
@@ -500,7 +512,7 @@ def render_attack_graph_ascii(graph: AttackGraph) -> str:
         edges.sort(key=lambda edge: (edge.weight, edge.target, edge.edge_id))
 
     roots = [node_id for node_id, count in incoming.items() if count == 0]
-    roots.sort(key=lambda node_id: (node_id != ENTRY_NODE_ID, node_id))
+    roots.sort(key=lambda node_id: (nodes[node_id].kind is not NodeKind.ENTRY, node_id))
     lines = ["HexPath Attack Graph", "===================="]
     expanded: set[str] = set()
 

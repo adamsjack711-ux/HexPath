@@ -304,6 +304,29 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("CVE-2024-6387", graph_image)
         self.assertIn("Total cost: 4.50", path_image)
 
+    def test_custom_entry_id_is_default_source_and_rendered_first(self) -> None:
+        scan, cves = sample_documents()
+        graph = build_attack_graph(scan, cves, entry_id="zz:operator")
+        isolated = GraphNode("host:2001:db8::99", NodeKind.HOST, "isolated")
+        graph = AttackGraph(nodes=(*graph.nodes, isolated), edges=graph.edges)
+
+        rendered = render_attack_graph_ascii(graph)
+
+        self.assertEqual(graph.default_source(), "zz:operator")
+        self.assertLess(
+            rendered.index("<zz:operator>"),
+            rendered.index("<host:2001:db8::99>"),
+        )
+
+    def test_default_source_requires_an_entry_node(self) -> None:
+        graph = AttackGraph(
+            nodes=(GraphNode("host:a", NodeKind.HOST, "a"),),
+            edges=(),
+        )
+
+        with self.assertRaisesRegex(GraphError, "no entry node"):
+            graph.default_source()
+
     def test_ascii_renderer_removes_terminal_control_characters(self) -> None:
         graph = AttackGraph(
             nodes=(GraphNode("entry", NodeKind.ENTRY, "bad\x1b[31m\nlabel"),),

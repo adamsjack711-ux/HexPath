@@ -16,6 +16,7 @@ from hexpath.graph import (
     build_attack_graph,
     render_attack_graph_ascii,
     render_path_ascii,
+    render_topology_ascii,
     vulnerability_cost,
 )
 from hexpath.models import Confidence, Evidence, EvidenceLevel
@@ -303,6 +304,28 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("-->", graph_image)
         self.assertIn("CVE-2024-6387", graph_image)
         self.assertIn("Total cost: 4.50", path_image)
+
+    def test_topology_renderer_shows_every_host_service_and_cve_status(self) -> None:
+        scan, cves = sample_documents()
+        scan["hosts"].append(
+            {
+                "id": "host:2001:db8::20",
+                "address": "2001:db8::20",
+                "hostnames": ["empty.lab"],
+                "evidence": [],
+            }
+        )
+
+        rendered = render_topology_ascii(scan, cves)
+
+        self.assertIn("HexPath Network Topology", rendered)
+        self.assertIn("[HOST] 2001:db8::10 (server.lab)", rendered)
+        self.assertIn("[SERVICE] tcp/22 open OpenSSH 9.6", rendered)
+        self.assertIn("[SERVICE] tcp/443 open Example HTTP 1.0", rendered)
+        self.assertIn("[CVE] CVE-2024-6387 score=9.0 confidence=medium", rendered)
+        self.assertIn("[HOST] 2001:db8::20 (empty.lab)", rendered)
+        self.assertIn("(no services discovered)", rendered)
+        self.assertIn("Scans: 1  Hosts: 2  Services: 2  CVE candidates: 2", rendered)
 
     def test_ascii_renderer_removes_terminal_control_characters(self) -> None:
         graph = AttackGraph(

@@ -543,6 +543,160 @@ def render_attack_graph_ascii(graph: AttackGraph) -> str:
     return "\n".join(lines)
 
 
+def render_topology_ascii(scan_document: Any, cve_document: Any) -> str:
+    """Render all discovered hosts, services, and CVE candidates as ASCII."""
+    if isinstance(scan_document, dict):
+        scan_documents = (scan_document,)
+    elif isinstance(scan_document, (list, tuple)) and scan_document:
+        scan_documents = tuple(scan_document)
+    else:
+        raise GraphError("at least one scan document object is required")
+    if not isinstance(cve_document, dict):
+        raise GraphError("CVE document must be an object")
+
+    raw_vulnerabilities = cve_document.get("vulnerabilities")
+    raw_matches = cve_document.get("matches")
+    if not isinstance(raw_vulnerabilities, list) or not isinstance(raw_matches, list):
+        raise GraphError("CVE document must contain vulnerability and match lists")
+
+    vulnerabilities: dict[str, dict[str, Any]] = {}
+    for raw_vulnerability in raw_vulnerabilities:
+        vulnerability = _required_object(raw_vulnerability, "vulnerability")
+        cve_id = _document_id(vulnerability, "vulnerability")
+        vulnerabilities[cve_id] = vulnerability
+
+    service_matches: dict[str, list[dict[str, Any]]] = {}
+    for raw_match in raw_matches:
+        match = _required_object(raw_match, "vulnerability match")
+        service_id = _required_text(match.get("service_id"), "match service_id")
+        cve_id = _required_text(match.get("cve_id"), "match cve_id")
+        if cve_id not in vulnerabilities:
+            raise GraphError(f"vulnerability match refers to unknown CVE {cve_id!r}")
+        service_matches.setdefault(service_id, []).append(match)
+
+    lines = ["HexPath Network Topology", "========================"]
+    for document_index, document in enumerate(scan_documents):
+        if not isinstance(document, dict):
+            raise GraphError("scan document must be an object")
+        raw_hosts = document.get("hosts")
+        raw_services = document.get("services")
+        if not isinstance(raw_hosts, list) or not isinstance(raw_services, list):
+            raise GraphError("scan document must contain host and service lists")
+        vantage = _required_text(
+            document.get("vantage", ENTRY_NODE_ID),
+            "scan vantage",
+        )
+        if document_index:
+            lines.append("")
+        if vantage == ENTRY_NODE_ID:
+            lines.append(f"[ENTRY] Scanner <{ENTRY_NODE_ID}>")
+        else:
+            lines.append(
+                f"[VANTAGE] {_terminal_text(vantage.removeprefix('host:'))} "
+                f"<{_terminal_text(vantage)}>"
+            )
+
+        hosts: list[tuple[str, dict[str, Any]]] = []
+        host_ids: set[str] = set()
+        for raw_host in raw_hosts:
+            host = _required_object(raw_host, "host")
+            host_id = _document_id(host, "host")
+            if host_id in host_ids:
+                raise GraphError(f"scan contains duplicate host {host_id!r}")
+            host_ids.add(host_id)
+            hosts.append((host_id, host))
+
+        services_by_host: dict[str, list[tuple[str, dict[str, Any]]]] = {
+            host_id: [] for host_id in host_ids
+        }
+        seen_services: set[str] = set()
+        for raw_service in raw_services:
+            service = _required_object(raw_service, "service")
+            service_id = _document_id(service, "service")
+            if service_id in seen_services:
+                raise GraphError(f"scan contains duplicate service {service_id!r}")
+            seen_services.add(service_id)
+            host_address = _required_text(service.get("host"), "service host")
+            host_id = f"host:{host_address}"
+            if host_id not in host_ids:
+                raise GraphError(f"service {service_id!r} refers to unknown host {host_id!r}")
+            services_by_host[host_id].append((service_id, service))
+
+        visible_hosts = [
+            item
+            for item in hosts
+            if item[0] != vantage or services_by_host[item[0]]
+        ]
+        if not visible_hosts:
+            lines.append("+-- (no hosts discovered)")
+            continue
+
+        for host_index, (host_id, host) in enumerate(visible_hosts):
+            host_last = host_index == len(visible_hosts) - 1
+            host_prefix = "    " if host_last else "|   "
+            address = _terminal_text(str(host.get("address", host_id)))
+            raw_hostnames = host.get("hostnames", [])
+            hostnames = (
+                ", ".join(_terminal_text(name) for name in raw_hostnames)
+                if isinstance(raw_hostnames, list)
+                else ""
+            )
+            hostname_text = f" ({hostnames})" if hostnames else ""
+            lines.append(
+                f"+-- [HOST] {address}{hostname_text} <{_terminal_text(host_id)}>"
+            )
+
+            host_services = services_by_host[host_id]
+            if not host_services:
+                lines.append(f"{host_prefix}+-- (no services discovered)")
+                continue
+            for service_index, (service_id, service) in enumerate(host_services):
+                service_last = service_index == len(host_services) - 1
+                service_prefix = host_prefix + ("    " if service_last else "|   ")
+                protocol = _terminal_text(str(service.get("protocol", "unknown")))
+                port = _terminal_text(str(service.get("port", "?")))
+                state = _terminal_text(str(service.get("state", "unknown")))
+                product = service.get("product") or service.get("name") or "unknown service"
+                version = f" {service['version']}" if service.get("version") else ""
+                lines.append(
+                    f"{host_prefix}+-- [SERVICE] {protocol}/{port} {state} "
+                    f"{_terminal_text(str(product))}{_terminal_text(version)} "
+                    f"<{_terminal_text(service_id)}>"
+                )
+
+                matches = service_matches.get(service_id, [])
+                if not matches:
+                    lines.append(f"{service_prefix}+-- (no CVE candidates)")
+                    continue
+                for match in matches:
+                    cve_id = _required_text(match.get("cve_id"), "match cve_id")
+                    vulnerability = vulnerabilities[cve_id]
+                    score = vulnerability.get("cvss_score")
+                    score_text = "n/a" if score is None else str(score)
+                    confidence = _terminal_text(str(match.get("confidence", "unknown")))
+                    lines.append(
+                        f"{service_prefix}+-- [CVE] {_terminal_text(cve_id)} "
+                        f"score={_terminal_text(score_text)} confidence={confidence}"
+                    )
+
+    host_count = sum(
+        len(document.get("hosts", []))
+        for document in scan_documents
+        if isinstance(document, dict)
+    )
+    service_count = sum(
+        len(document.get("services", []))
+        for document in scan_documents
+        if isinstance(document, dict)
+    )
+    lines.append("")
+    lines.append(
+        f"Scans: {len(scan_documents)}  Hosts: {host_count}  "
+        f"Services: {service_count}  CVE candidates: {len(raw_matches)}"
+    )
+    return "\n".join(lines)
+
+
 def render_path_ascii(graph: AttackGraph, path: ShortestPath) -> str:
     """Render one selected path as an ASCII command-line diagram."""
     nodes = {node.node_id: node for node in graph.nodes}

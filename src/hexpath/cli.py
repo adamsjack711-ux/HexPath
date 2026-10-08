@@ -17,6 +17,7 @@ from hexpath.graph import (
     build_attack_graph,
     render_attack_graph_ascii,
     render_path_ascii,
+    render_topology_ascii,
 )
 from hexpath.models import Evidence, EvidenceLevel, Host
 from hexpath.scanner import (
@@ -397,7 +398,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.json:
                 print(json.dumps(combined_result, indent=2, sort_keys=True))
             else:
-                print(render_attack_graph_ascii(graph))
+                print(render_topology_ascii(scan_document, cve_document))
                 coverage = cve_document["coverage"]
                 print()
                 print(

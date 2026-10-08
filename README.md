@@ -63,7 +63,7 @@ That command automatically:
 2. Runs Nmap IPv6 service and version detection.
 3. Checks discovered CPEs against NVD.
 4. Builds the directed attack graph.
-5. Prints the ASCII graph in the terminal.
+5. Prints the complete host, service, and CVE topology as ASCII in the terminal.
 
 Familiar Nmap-style flags are also accepted:
 
@@ -75,6 +75,20 @@ Save the complete scan, CVE, and graph data when needed:
 
 ```sh
 hexpath -oJ results.json 2001:db8:1::10
+```
+
+The terminal keeps the readable topology while `results.json` stores the same
+assessment as structured scan, CVE, and graph data:
+
+```text
+HexPath Network Topology
+========================
+[ENTRY] Scanner <entry:scanner>
++-- [HOST] 2001:db8:1::10 (web.lab) <host:2001:db8:1::10>
+    +-- [SERVICE] tcp/22 open OpenSSH 9.6
+    |   +-- [CVE] CVE-2024-6387 score=9.0 confidence=medium
+    +-- [SERVICE] tcp/443 open nginx 1.26
+        +-- (no CVE candidates)
 ```
 
 Use a different scope file with `--scope`, or set `HEXPATH_SCOPE` once in the

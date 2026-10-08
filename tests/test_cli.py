@@ -132,6 +132,27 @@ class QuickCliTests(unittest.TestCase):
         )
         self.assertIn("Created", output.getvalue())
 
+    def test_scope_init_accepts_both_address_families(self) -> None:
+        output_path = self.directory / "dual-stack-scope.json"
+
+        with redirect_stdout(StringIO()):
+            exit_code = main(
+                [
+                    "scope",
+                    "init",
+                    "192.0.2.0/24",
+                    "2001:db8:1::/64",
+                    "-o",
+                    str(output_path),
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            json.loads(output_path.read_text(encoding="utf-8"))["targets"],
+            ["192.0.2.0/24", "2001:db8:1::/64"],
+        )
+
     @patch("hexpath.cli.collect_server_inventory")
     def test_inventory_prints_ascii_and_saves_json(self, collect_mock) -> None:
         collect_mock.return_value = {
@@ -252,6 +273,44 @@ class QuickCliTests(unittest.TestCase):
     @patch("hexpath.cli.check_scan_documents")
     @patch("hexpath.cli.parse_nmap_xml")
     @patch("hexpath.cli.run_nmap", return_value="<nmaprun/>")
+    def test_inline_ipv4_scope_runs_ipv4_scan(
+        self,
+        run_mock,
+        parse_mock,
+        check_mock,
+    ) -> None:
+        parse_mock.return_value = NmapScanResult(hosts=(), services=())
+        check_mock.return_value = ScanVulnerabilityResult(
+            checks=(), vulnerabilities=(), matches=(), service_count=0,
+        )
+
+        with redirect_stdout(StringIO()):
+            exit_code = main(
+                ["--scope", "192.0.2.0/24", "-4", "192.0.2.10"]
+            )
+
+        self.assertEqual(exit_code, 0)
+        command = run_mock.call_args.args[0]
+        self.assertEqual(command.ip_version, 4)
+        self.assertNotIn("-6", command.arguments)
+        self.assertIn("192.0.2.10/32", command.arguments)
+
+    @patch("hexpath.cli.run_nmap")
+    def test_explicit_ipv6_mode_rejects_ipv4_target(self, run_mock) -> None:
+        errors = StringIO()
+
+        with redirect_stderr(errors):
+            exit_code = main(
+                ["--scope", "192.0.2.0/24", "-6", "192.0.2.10"]
+            )
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("requested IPv6", errors.getvalue())
+        run_mock.assert_not_called()
+
+    @patch("hexpath.cli.check_scan_documents")
+    @patch("hexpath.cli.parse_nmap_xml")
+    @patch("hexpath.cli.run_nmap", return_value="<nmaprun/>")
     def test_from_accepts_plain_authorized_ipv6_address(
         self,
         _run_mock,
@@ -317,6 +376,29 @@ class ScanCliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn("nmap -6", output.getvalue())
         self.assertIn("::1/128", output.getvalue())
+
+    def test_plan_prints_ipv4_command_without_ipv6_switch(self) -> None:
+        scope_path = self.scope_path.with_name("ipv4-scope.json")
+        scope_path.write_text(
+            json.dumps({"name": "IPv4 lab", "targets": ["192.0.2.0/24"]}),
+            encoding="utf-8",
+        )
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(
+                [
+                    "scan",
+                    "plan",
+                    "--scope",
+                    str(scope_path),
+                    "192.0.2.10",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertNotIn(" -6 ", f" {output.getvalue()} ")
+        self.assertIn("192.0.2.10/32", output.getvalue())
 
     @patch("hexpath.cli.parse_nmap_xml")
     @patch("hexpath.cli.run_nmap", return_value="<nmaprun/>")

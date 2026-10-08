@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
+from ipaddress import ip_network
 import json
 import os
 from pathlib import Path
@@ -57,10 +58,10 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the HexPath command-line parser."""
     parser = argparse.ArgumentParser(
         prog="hexpath",
-        description="Authorized IPv6 discovery and attack-path analysis",
+        description="Authorized IPv4 and IPv6 discovery and attack-path analysis",
         epilog=(
             "quick start:\n"
-            "  hexpath scope init 2001:db8:1::/64\n"
+            "  hexpath scope init 192.0.2.0/24 2001:db8:1::/64\n"
             "  hexpath 2001:db8:1::10\n\n"
             "The direct target form runs scanning, CVE checking, and ASCII graph output."
         ),
@@ -74,13 +75,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     assess_parser.add_argument(
         "--scope",
-        help="authorized IPv6 CIDR or scope JSON path; defaults to ./scope.json",
+        help="authorized IP CIDR or scope JSON path; defaults to ./scope.json",
     )
-    assess_parser.add_argument(
+    family_group = assess_parser.add_mutually_exclusive_group()
+    family_group.add_argument(
+        "-4",
+        dest="ipv4",
+        action="store_true",
+        help="require IPv4 targets (otherwise inferred from the targets)",
+    )
+    family_group.add_argument(
         "-6",
         dest="ipv6",
         action="store_true",
-        help="use IPv6 scanning (HexPath always uses IPv6)",
+        help="require IPv6 targets (otherwise inferred from the targets)",
     )
     assess_parser.add_argument(
         "-sV",
@@ -102,11 +110,11 @@ def build_parser() -> argparse.ArgumentParser:
     assess_parser.add_argument(
         "--from",
         dest="vantage",
-        help="IPv6 host where this scan is being run",
+        help="IP host where this scan is being run",
     )
     assess_parser.add_argument(
         "--target",
-        help="IPv6 host to analyze after scanning (address or host:<IPv6>)",
+        help="IP host to analyze after scanning (address or host:<IP>)",
     )
     assess_parser.add_argument(
         "--paths", type=_path_limit, default=3,
@@ -134,7 +142,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print the combined result as JSON instead of ASCII",
     )
-    assess_parser.add_argument("targets", nargs="+", help="authorized IPv6 targets")
+    assess_parser.add_argument("targets", nargs="+", help="authorized IP targets")
 
     scope_parser = subcommands.add_parser("scope", help="work with assessment scopes")
     scope_commands = scope_parser.add_subparsers(dest="scope_command", required=True)
@@ -143,7 +151,7 @@ def build_parser() -> argparse.ArgumentParser:
         "init",
         help="create a scope.json file",
     )
-    init_parser.add_argument("targets", nargs="+", help="authorized IPv6 networks")
+    init_parser.add_argument("targets", nargs="+", help="authorized IPv4 or IPv6 networks")
     init_parser.add_argument(
         "--name",
         default="HexPath assessment",
@@ -163,10 +171,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     check_parser = scope_commands.add_parser(
         "check",
-        help="check whether an IPv6 address is authorized",
+        help="check whether an IP address is authorized",
     )
     check_parser.add_argument("--scope", required=True, help="path to a scope JSON file")
-    check_parser.add_argument("--target", required=True, help="IPv6 address to check")
+    check_parser.add_argument("--target", required=True, help="IP address to check")
 
     scan_parser = subcommands.add_parser("scan", help="plan authorized Nmap scans")
     scan_commands = scan_parser.add_subparsers(dest="scan_command", required=True)
@@ -187,7 +195,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip host discovery and treat targets as online",
     )
     plan_parser.add_argument("-p", "--ports", help="service ports to scan")
-    plan_parser.add_argument("targets", nargs="+", help="authorized IPv6 addresses or CIDRs")
+    plan_parser.add_argument("targets", nargs="+", help="authorized IP addresses or CIDRs")
 
     run_parser = scan_commands.add_parser(
         "run",
@@ -215,9 +223,9 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         "--vantage",
         default=ENTRY_NODE_ID,
-        help="entry:scanner or the authorized host:<IPv6> running this scan",
+        help="entry:scanner or the authorized host:<IP> running this scan",
     )
-    run_parser.add_argument("targets", nargs="+", help="authorized IPv6 addresses or CIDRs")
+    run_parser.add_argument("targets", nargs="+", help="authorized IP addresses or CIDRs")
 
     cve_parser = subcommands.add_parser(
         "cve",
@@ -312,10 +320,10 @@ def build_parser() -> argparse.ArgumentParser:
     graph_path_parser.add_argument(
         "--source",
         default=ENTRY_NODE_ID,
-        help="source node identifier or IPv6 host address",
+        help="source node identifier or IP host address",
     )
     graph_path_parser.add_argument(
-        "--target", required=True, help="target node identifier or IPv6 address",
+        "--target", required=True, help="target node identifier or IP address",
     )
     graph_path_parser.add_argument(
         "--json",
@@ -327,7 +335,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     graph_targets_parser.add_argument("--graph", required=True, help="graph JSON path")
     graph_targets_parser.add_argument(
-        "--source", default=ENTRY_NODE_ID, help="source node ID or IPv6 host address",
+        "--source", default=ENTRY_NODE_ID, help="source node ID or IP host address",
     )
     graph_targets_parser.add_argument("--json", action="store_true")
     graph_paths_parser = graph_commands.add_parser(
@@ -335,10 +343,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     graph_paths_parser.add_argument("--graph", required=True, help="graph JSON path")
     graph_paths_parser.add_argument(
-        "--source", default=ENTRY_NODE_ID, help="source node ID or IPv6 host address",
+        "--source", default=ENTRY_NODE_ID, help="source node ID or IP host address",
     )
     graph_paths_parser.add_argument(
-        "--target", required=True, help="node ID or IPv6 host address",
+        "--target", required=True, help="node ID or IP host address",
     )
     graph_paths_parser.add_argument(
         "--limit", type=_path_limit, default=3,
@@ -405,13 +413,17 @@ def _load_quick_scope(requested_scope: str | None) -> Scope:
     raw_scope = requested_scope or os.environ.get("HEXPATH_SCOPE") or "scope.json"
     scope_path = Path(raw_scope)
     if not scope_path.is_file():
-        if ":" in raw_scope:
+        try:
+            inline_network = ip_network(raw_scope, strict=True)
+        except ValueError:
+            inline_network = None
+        if inline_network is not None:
             return Scope.from_dict(
-                {"name": "Command-line scope", "targets": [raw_scope]}
+                {"name": "Command-line scope", "targets": [str(inline_network)]}
             )
         raise ScopeError(
             f"scope file not found: {scope_path}; create one with "
-            "'hexpath scope init <authorized-IPv6-network>'"
+            "'hexpath scope init <authorized-IP-network>'"
         )
     return Scope.from_json_file(scope_path)
 
@@ -484,6 +496,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ScanProfile.SERVICES,
                 skip_discovery=args.skip_discovery,
                 ports=args.ports,
+                ip_version=4 if args.ipv4 else 6 if args.ipv6 else None,
             )
             xml_output = run_nmap(command, timeout_seconds=args.timeout)
             scan_result = parse_nmap_xml(

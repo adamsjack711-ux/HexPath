@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 import heapq
-from ipaddress import IPv6Address
+from ipaddress import ip_address
 import json
 import math
 import textwrap
@@ -163,11 +163,11 @@ class AttackGraph:
         return self._shortest_path(source, target)
 
     def resolve_node(self, selector: str) -> str:
-        """Resolve an exact node ID or an equivalent IPv6 host address."""
+        """Resolve an exact node ID or an equivalent IP host address."""
         if any(node.node_id == selector for node in self.nodes):
             return selector
         try:
-            address = IPv6Address(selector.removeprefix("host:"))
+            address = ip_address(selector.removeprefix("host:"))
         except ValueError:
             raise GraphError(
                 f"unknown node {selector!r}; use 'hexpath graph targets' to list hosts"
@@ -176,7 +176,7 @@ class AttackGraph:
             if node.kind != NodeKind.HOST:
                 continue
             try:
-                node_address = IPv6Address(node.node_id.removeprefix("host:"))
+                node_address = ip_address(node.node_id.removeprefix("host:"))
             except ValueError:
                 continue
             if node_address == address:

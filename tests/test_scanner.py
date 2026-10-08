@@ -63,6 +63,50 @@ class NmapCommandTests(unittest.TestCase):
         self.assertEqual(command.targets, ("2001:db8:1::/80",))
         self.assertIn("--version-light", command.arguments)
 
+    def test_builds_ipv4_command_without_ipv6_switch(self) -> None:
+        scope = Scope.from_dict(
+            {"name": "IPv4 lab", "targets": ["192.0.2.0/24"]}
+        )
+
+        command = build_nmap_command(
+            scope,
+            ["192.0.2.10"],
+            ScanProfile.DISCOVERY,
+        )
+
+        self.assertEqual(command.targets, ("192.0.2.10/32",))
+        self.assertEqual(command.ip_version, 4)
+        self.assertNotIn("-6", command.arguments)
+        self.assertEqual(command.arguments[-2:], ("-sn", "192.0.2.10/32"))
+
+    def test_rejects_mixed_address_families_in_one_scan(self) -> None:
+        scope = Scope.from_dict(
+            {
+                "name": "dual-stack lab",
+                "targets": ["192.0.2.0/24", "2001:db8:1::/64"],
+            }
+        )
+
+        with self.assertRaisesRegex(ScannerError, "cannot mix IPv4 and IPv6"):
+            build_nmap_command(
+                scope,
+                ["192.0.2.10", "2001:db8:1::10"],
+                ScanProfile.DISCOVERY,
+            )
+
+    def test_rejects_explicit_address_family_mismatch(self) -> None:
+        scope = Scope.from_dict(
+            {"name": "IPv4 lab", "targets": ["192.0.2.0/24"]}
+        )
+
+        with self.assertRaisesRegex(ScannerError, "requested IPv6"):
+            build_nmap_command(
+                scope,
+                ["192.0.2.10"],
+                ScanProfile.DISCOVERY,
+                ip_version=6,
+            )
+
     def test_can_skip_host_discovery_for_filtered_targets(self) -> None:
         command = build_nmap_command(
             self.scope,
@@ -113,6 +157,15 @@ class NmapCommandTests(unittest.TestCase):
     def test_rejects_out_of_scope_scan_vantage(self) -> None:
         with self.assertRaisesRegex(ScannerError, "invalid scan vantage"):
             require_authorized_vantage(self.scope, "host:2001:db8:2::10")
+
+    def test_accepts_authorized_ipv4_scan_vantage(self) -> None:
+        scope = Scope.from_dict(
+            {"name": "IPv4 lab", "targets": ["192.0.2.0/24"]}
+        )
+
+        vantage = require_authorized_vantage(scope, "host:192.0.2.10")
+
+        self.assertEqual(vantage, "host:192.0.2.10")
 
 
 class NmapRunnerTests(unittest.TestCase):
@@ -190,6 +243,39 @@ class NmapXmlParserTests(unittest.TestCase):
         self.assertEqual(document["vantage"], "entry:scanner")
         self.assertEqual(document["hosts"][0]["hostnames"], ["server.lab"])
         self.assertEqual(document["services"][0]["protocol"], "tcp")
+
+    def test_parses_ipv4_host_and_service(self) -> None:
+        result = parse_nmap_xml(
+            """<nmaprun start="1791509400">
+            <host>
+              <status state="up" reason="syn-ack"/>
+              <address addr="192.0.2.10" addrtype="ipv4"/>
+              <hostnames><hostname name="web.lab"/></hostnames>
+              <ports>
+                <port protocol="tcp" portid="443">
+                  <state state="open" reason="syn-ack"/>
+                  <service name="https" product="nginx" version="1.26"/>
+                </port>
+              </ports>
+            </host>
+            </nmaprun>""",
+            reference="ipv4-fixture.xml",
+        )
+
+        self.assertEqual(result.hosts[0].record_id, "host:192.0.2.10")
+        self.assertEqual(result.hosts[0].hostnames, ("web.lab",))
+        self.assertEqual(
+            result.services[0].record_id,
+            "service:[192.0.2.10]:tcp:443",
+        )
+
+    def test_rejects_address_family_mislabeled_in_xml(self) -> None:
+        with self.assertRaisesRegex(NmapParseError, "marked IPV4 is not IPV4"):
+            parse_nmap_xml(
+                """<nmaprun><host><status state="up"/>
+                <address addr="2001:db8::10" addrtype="ipv4"/>
+                </host></nmaprun>"""
+            )
 
     def test_rejects_malformed_xml(self) -> None:
         with self.assertRaisesRegex(NmapParseError, "invalid Nmap XML"):

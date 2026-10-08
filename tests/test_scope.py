@@ -28,9 +28,27 @@ class ScopeTests(unittest.TestCase):
         with self.assertRaises(TargetOutsideScopeError):
             scope.require_authorized("2001:db8:2::42")
 
-    def test_rejects_ipv4_scope(self) -> None:
-        with self.assertRaisesRegex(ScopeError, "IPv4"):
-            Scope.from_dict({"name": "test lab", "targets": ["192.0.2.0/24"]})
+    def test_accepts_ipv4_scope_and_address(self) -> None:
+        scope = Scope.from_dict(
+            {"name": "test lab", "targets": ["192.0.2.0/24"]}
+        )
+
+        address = scope.require_authorized("192.0.2.42")
+
+        self.assertEqual(str(address), "192.0.2.42")
+
+    def test_accepts_mixed_ipv4_and_ipv6_scope(self) -> None:
+        scope = Scope.from_dict(
+            {
+                "name": "dual-stack lab",
+                "targets": ["192.0.2.0/24", "2001:db8:1::/64"],
+            }
+        )
+
+        self.assertEqual(scope.require_authorized("192.0.2.10").version, 4)
+        self.assertEqual(scope.require_authorized("2001:db8:1::10").version, 6)
+        with self.assertRaises(TargetOutsideScopeError):
+            scope.require_authorized("198.51.100.10")
 
     def test_rejects_network_with_host_bits_set(self) -> None:
         with self.assertRaisesRegex(ScopeError, "host bits set"):
@@ -67,6 +85,23 @@ class ScopeTests(unittest.TestCase):
 
         with self.assertRaises(TargetOutsideScopeError):
             scope.require_authorized_network("2001:db8::/32")
+
+    def test_accepts_ipv4_subnet_contained_by_scope(self) -> None:
+        scope = Scope.from_dict(
+            {"name": "test lab", "targets": ["192.0.2.0/24"]}
+        )
+
+        network = scope.require_authorized_network("192.0.2.128/25")
+
+        self.assertEqual(str(network), "192.0.2.128/25")
+
+    def test_rejects_ipv4_subnet_broader_than_scope(self) -> None:
+        scope = Scope.from_dict(
+            {"name": "test lab", "targets": ["192.0.2.0/24"]}
+        )
+
+        with self.assertRaises(TargetOutsideScopeError):
+            scope.require_authorized_network("192.0.0.0/16")
 
 
 if __name__ == "__main__":

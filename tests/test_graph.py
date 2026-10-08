@@ -236,6 +236,57 @@ class PathComparisonTests(unittest.TestCase):
 
 
 class BuilderTests(unittest.TestCase):
+    def test_builds_and_resolves_ipv4_host_path(self) -> None:
+        observed = evidence().to_dict()
+        service_id = "service:[192.0.2.10]:tcp:443"
+        graph = build_attack_graph(
+            {
+                "hosts": [
+                    {
+                        "id": "host:192.0.2.10",
+                        "address": "192.0.2.10",
+                        "hostnames": ["web.lab"],
+                        "evidence": [observed],
+                    }
+                ],
+                "services": [
+                    {
+                        "id": service_id,
+                        "host": "192.0.2.10",
+                        "port": 443,
+                        "protocol": "tcp",
+                        "state": "open",
+                        "name": "https",
+                        "product": "nginx",
+                        "version": "1.26",
+                        "cpes": [],
+                        "evidence": [observed],
+                    }
+                ],
+            },
+            {
+                "vulnerabilities": [
+                    {"id": "CVE-2026-45678", "cvss_score": 8.0}
+                ],
+                "matches": [
+                    {
+                        "service_id": service_id,
+                        "cve_id": "CVE-2026-45678",
+                        "confidence": "high",
+                        "reason": "Test candidate",
+                        "evidence": [observed],
+                    }
+                ],
+            },
+        )
+
+        target = graph.resolve_node("192.0.2.10")
+        path = graph.shortest_path(ENTRY_NODE_ID, target)
+
+        self.assertEqual(target, "host:192.0.2.10")
+        self.assertEqual(path.nodes[-1], target)
+        self.assertEqual(path.total_weight, 4.0)
+
     def test_compares_candidate_routes_with_cost_and_confidence(self) -> None:
         scan, cves = sample_documents()
         graph = build_attack_graph(scan, cves)

@@ -36,7 +36,64 @@ python3 -m venv .venv
 .venv/bin/python -m pip install --editable .
 ```
 
-## Scope and scanning
+## Quick command-line use
+
+HexPath runs entirely in the terminal. Create the authorized IPv6 scope once:
+
+```sh
+hexpath scope init 2001:db8:1::/64
+```
+
+For a one-off assessment, provide the authorized network directly and skip the
+scope file:
+
+```sh
+hexpath --scope 2001:db8:1::/64 2001:db8:1::10
+```
+
+Then assess a target with one command:
+
+```sh
+hexpath 2001:db8:1::10
+```
+
+That command automatically:
+
+1. Validates the target against `scope.json`.
+2. Runs Nmap IPv6 service and version detection.
+3. Checks discovered CPEs against NVD.
+4. Builds the directed attack graph.
+5. Prints the ASCII graph in the terminal.
+
+Familiar Nmap-style flags are also accepted:
+
+```sh
+hexpath -6 -sV 2001:db8:1::10
+```
+
+Save the complete scan, CVE, and graph data when needed:
+
+```sh
+hexpath -oJ results.json 2001:db8:1::10
+```
+
+Use a different scope file with `--scope`, or set `HEXPATH_SCOPE` once in the
+shell. Record a scan that is actually run from another authorized host with
+`--from`:
+
+```sh
+hexpath --scope lab.json --from 2001:db8:1::10 2001:db8:1::20
+```
+
+Run `hexpath --help` to see the short workflow and `hexpath assess --help` for
+all direct-scan options.
+
+## Advanced commands
+
+The commands below expose each pipeline stage separately for debugging,
+research, and multi-file analysis.
+
+### Scope and scanning
 
 Preview a discovery command after validating the target against the scope file:
 
@@ -72,7 +129,7 @@ that the vantage address is inside the authorized IPv6 scope.
 
 Every target must be fully contained within an allowed IPv6 network. HexPath rejects broader networks and IPv4 targets before starting Nmap.
 
-## CVE checking
+### CVE checking
 
 Check every unique service CPE across saved scans against NVD:
 
@@ -100,7 +157,7 @@ Set `NVD_API_KEY` in the environment when an NVD API key is available. HexPath s
 
 CPE findings are candidate matches. Nmap identifies the product and version remotely, and NVD identifies applicable CVEs, but a vendor may have backported a patch without changing the reported version. HexPath therefore records these links as inferred, medium-confidence evidence until patch status is validated.
 
-## Attack graph
+### Attack graph
 
 Build a reusable graph file and display its ASCII representation:
 

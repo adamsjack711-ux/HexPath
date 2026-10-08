@@ -22,6 +22,165 @@ from hexpath.vulnerabilities import (
 )
 
 
+class QuickCliTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary_directory.cleanup)
+        self.directory = Path(self.temporary_directory.name)
+        self.scope_path = self.directory / "scope.json"
+        self.scope_path.write_text(
+            json.dumps({"name": "loopback", "targets": ["::1/128"]}),
+            encoding="utf-8",
+        )
+
+    def test_scope_init_creates_default_format(self) -> None:
+        output_path = self.directory / "new-scope.json"
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(
+                [
+                    "scope",
+                    "init",
+                    "2001:db8:1::/64",
+                    "--name",
+                    "Lab",
+                    "-o",
+                    str(output_path),
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            json.loads(output_path.read_text(encoding="utf-8")),
+            {"name": "Lab", "targets": ["2001:db8:1::/64"]},
+        )
+        self.assertIn("Created", output.getvalue())
+
+    @patch("hexpath.cli.check_scan_documents")
+    @patch("hexpath.cli.parse_nmap_xml")
+    @patch("hexpath.cli.run_nmap", return_value="<nmaprun/>")
+    def test_direct_target_runs_complete_ascii_workflow(
+        self,
+        run_mock,
+        parse_mock,
+        check_mock,
+    ) -> None:
+        parse_mock.return_value = NmapScanResult(hosts=(), services=())
+        check_mock.return_value = ScanVulnerabilityResult(
+            checks=(),
+            vulnerabilities=(),
+            matches=(),
+            service_count=0,
+        )
+        result_path = self.directory / "result.json"
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(
+                [
+                    "--scope",
+                    str(self.scope_path),
+                    "-6",
+                    "-sV",
+                    "-oJ",
+                    str(result_path),
+                    "::1",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("HexPath Attack Graph", output.getvalue())
+        self.assertIn("CVE coverage: 0/0", output.getvalue())
+        self.assertIn("Saved JSON:", output.getvalue())
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        self.assertEqual(result["schema_version"], 1)
+        self.assertEqual(result["scan"]["vantage"], "entry:scanner")
+        self.assertEqual(result["graph"]["nodes"][0]["id"], "entry:scanner")
+        self.assertIn("-sV", run_mock.call_args.args[0].arguments)
+        parse_mock.assert_called_once_with(
+            "<nmaprun/>",
+            reference="live-nmap",
+            vantage="entry:scanner",
+        )
+
+    def test_direct_target_explains_how_to_create_missing_scope(self) -> None:
+        errors = StringIO()
+
+        with redirect_stderr(errors):
+            exit_code = main(
+                [
+                    "--scope",
+                    str(self.directory / "missing.json"),
+                    "::1",
+                ]
+            )
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("hexpath scope init", errors.getvalue())
+
+    @patch("hexpath.cli.check_scan_documents")
+    @patch("hexpath.cli.parse_nmap_xml")
+    @patch("hexpath.cli.run_nmap", return_value="<nmaprun/>")
+    def test_inline_scope_cidr_needs_no_scope_file(
+        self,
+        _run_mock,
+        parse_mock,
+        check_mock,
+    ) -> None:
+        parse_mock.return_value = NmapScanResult(hosts=(), services=())
+        check_mock.return_value = ScanVulnerabilityResult(
+            checks=(),
+            vulnerabilities=(),
+            matches=(),
+            service_count=0,
+        )
+
+        with redirect_stdout(StringIO()):
+            exit_code = main(["--scope", "::1/128", "::1"])
+
+        self.assertEqual(exit_code, 0)
+
+    @patch("hexpath.cli.check_scan_documents")
+    @patch("hexpath.cli.parse_nmap_xml")
+    @patch("hexpath.cli.run_nmap", return_value="<nmaprun/>")
+    def test_from_accepts_plain_authorized_ipv6_address(
+        self,
+        _run_mock,
+        parse_mock,
+        check_mock,
+    ) -> None:
+        parse_mock.return_value = NmapScanResult(
+            hosts=(),
+            services=(),
+            vantage="host:::1",
+        )
+        check_mock.return_value = ScanVulnerabilityResult(
+            checks=(),
+            vulnerabilities=(),
+            matches=(),
+            service_count=0,
+        )
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(
+                [
+                    "--scope",
+                    str(self.scope_path),
+                    "--from",
+                    "::1",
+                    "::1",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("[HOST] ::1 <host:::1>", output.getvalue())
+        scan_document = check_mock.call_args.args[0][0]
+        self.assertEqual(scan_document["vantage"], "host:::1")
+        self.assertEqual(scan_document["hosts"][0]["id"], "host:::1")
+
+
 class ScanCliTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()

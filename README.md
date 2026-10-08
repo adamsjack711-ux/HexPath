@@ -72,6 +72,14 @@ that the vantage address is inside the authorized IPv6 scope.
 
 Every target must be fully contained within an allowed IPv6 network. HexPath rejects broader networks and IPv4 targets before starting Nmap.
 
+The scope file is the main guard against scanning the wrong network, so a
+scope target is refused if it is too broad or is a special-use range. By
+default a scope network must be `/48` or narrower, so a mistyped prefix such
+as `::/0` or `2001:db8::/32` cannot silently authorize a huge range. Multicast,
+loopback, unspecified, link-local, and IPv4-mapped ranges are always refused.
+A deliberately wider scope can be allowed by loading it with a lower
+`minimum_prefix_length`, but the special-use ranges stay refused regardless.
+
 ## CVE checking
 
 Check every unique service CPE across saved scans against NVD:

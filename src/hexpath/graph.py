@@ -810,6 +810,264 @@ def _topology_box(labels: tuple[str, ...]) -> list[str]:
     ]
 
 
+def render_server_inventory_ascii(document: Any) -> str:
+    """Render complete server inventory in bounded-width top-down sections."""
+    if not isinstance(document, dict):
+        raise GraphError("server inventory must be an object")
+    server = _required_text(document.get("server"), "inventory server")
+    system = document.get("system")
+    if not isinstance(system, dict):
+        raise GraphError("server inventory must contain system information")
+
+    interfaces = _inventory_list(document, "interfaces")
+    services = _inventory_list(document, "listening_services")
+    libvirt_networks = _inventory_list(document, "networks")
+    vms = _inventory_list(document, "vms")
+    container_networks = _inventory_list(document, "container_networks")
+    containers = _inventory_list(document, "containers")
+
+    server_tree = _TopologyTree(
+        (
+            "SERVER",
+            server,
+            str(system.get("os", "unknown OS")),
+            str(system.get("kernel", "unknown kernel")),
+        )
+    )
+    server_rendered = _render_topology_tree(server_tree)
+    lines = ["HexPath Full Server Topology", "============================"]
+    lines.extend(line.rstrip() for line in server_rendered.lines)
+
+    interface_nodes = tuple(
+        _TopologyTree(
+            (
+                f"INTERFACE {item.get('name', 'unknown')}",
+                f"STATE {item.get('state', 'unknown')}",
+                *((f"MASTER {item['master']}",) if item.get("master") else ()),
+                *(
+                    f"{address.get('family', '?')} "
+                    f"{address.get('address', '?')}/{address.get('prefixlen', '?')}"
+                    for address in item.get("addresses", [])
+                    if isinstance(address, dict)
+                ),
+            )
+        )
+        for item in interfaces
+    )
+    _append_inventory_section(lines, server, "NETWORK INTERFACES", interface_nodes)
+
+    service_nodes = tuple(
+        _TopologyTree(
+            (
+                f"{str(item.get('protocol', '?')).upper()} {item.get('state', '?')}",
+                str(item.get("local", "unknown endpoint")),
+                *((str(item["process"]),) if item.get("process") else ()),
+            )
+        )
+        for item in services
+    )
+    _append_inventory_section(lines, server, "LISTENING SERVICES", service_nodes)
+
+    vm_by_network: dict[str, list[dict[str, Any]]] = {}
+    unattached_vms: list[dict[str, Any]] = []
+    for vm in vms:
+        linked = False
+        for interface in vm.get("interfaces", []):
+            if not isinstance(interface, dict):
+                continue
+            network_name = interface.get("network")
+            if isinstance(network_name, str) and network_name:
+                vm_by_network.setdefault(network_name, []).append(vm)
+                linked = True
+        if not linked:
+            unattached_vms.append(vm)
+    libvirt_nodes: list[_TopologyTree] = []
+    for network in libvirt_networks:
+        name = str(network.get("name", "unknown"))
+        vm_nodes = tuple(_vm_inventory_node(vm, name) for vm in vm_by_network.get(name, []))
+        if not vm_nodes:
+            vm_nodes = (_TopologyTree(("NO ATTACHED VMS",)),)
+        libvirt_nodes.append(
+            _TopologyTree(
+                (
+                    f"LIBVIRT NETWORK {name}",
+                    "ACTIVE" if network.get("active") else "INACTIVE",
+                    *((f"BRIDGE {network['bridge']}",) if network.get("bridge") else ()),
+                ),
+                vm_nodes,
+            )
+        )
+    if unattached_vms:
+        libvirt_nodes.append(
+            _TopologyTree(
+                ("UNATTACHED VMS",),
+                tuple(_vm_inventory_node(vm, None) for vm in unattached_vms),
+            )
+        )
+    _append_inventory_section(
+        lines,
+        server,
+        "LIBVIRT NETWORKS AND VMS",
+        tuple(libvirt_nodes),
+        chunk_size=2,
+    )
+
+    containers_by_network: dict[str, list[dict[str, Any]]] = {}
+    unattached_containers: list[dict[str, Any]] = []
+    for container in containers:
+        raw_networks = container.get("networks", [])
+        network_names = [
+            network.get("name")
+            for network in raw_networks
+            if isinstance(network, dict) and isinstance(network.get("name"), str)
+        ]
+        if not network_names:
+            unattached_containers.append(container)
+        for network_name in network_names:
+            containers_by_network.setdefault(network_name, []).append(container)
+
+    docker_nodes: list[_TopologyTree] = []
+    for network in container_networks:
+        name = str(network.get("name", "unknown"))
+        container_nodes = tuple(
+            _container_inventory_node(container, name)
+            for container in containers_by_network.get(name, [])
+        )
+        if not container_nodes:
+            container_nodes = (_TopologyTree(("NO ATTACHED CONTAINERS",)),)
+        subnet_text = ", ".join(str(item) for item in network.get("subnets", []))
+        docker_nodes.append(
+            _TopologyTree(
+                (
+                    f"DOCKER NETWORK {name}",
+                    f"DRIVER {network.get('driver', 'unknown')}",
+                    *((subnet_text,) if subnet_text else ()),
+                ),
+                container_nodes,
+            )
+        )
+    _append_inventory_section(
+        lines,
+        server,
+        "DOCKER NETWORKS",
+        tuple(docker_nodes),
+        chunk_size=2,
+    )
+    if unattached_containers:
+        _append_inventory_section(
+            lines,
+            server,
+            "UNATTACHED / STOPPED CONTAINERS",
+            tuple(
+                _container_inventory_node(container, None)
+                for container in unattached_containers
+            ),
+        )
+
+    lines.append("")
+    lines.append(
+        f"Interfaces: {len(interfaces)}  Listening services: {len(services)}  "
+        f"VMs: {len(vms)}  Containers: {len(containers)}"
+    )
+    lines.append(
+        f"Libvirt networks: {len(libvirt_networks)}  "
+        f"Docker networks: {len(container_networks)}"
+    )
+    return "\n".join(lines)
+
+
+def _inventory_list(document: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    value = document.get(key)
+    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+        raise GraphError(f"server inventory {key!r} must be a list of objects")
+    return value
+
+
+def _append_inventory_section(
+    lines: list[str],
+    server: str,
+    title: str,
+    nodes: tuple[_TopologyTree, ...],
+    *,
+    chunk_size: int = 4,
+) -> None:
+    section_nodes = nodes or (_TopologyTree(("NONE FOUND",)),)
+    for start in range(0, len(section_nodes), chunk_size):
+        chunk = section_nodes[start : start + chunk_size]
+        end = min(start + chunk_size, len(section_nodes))
+        range_label = (
+            f"{start + 1}-{end} OF {len(section_nodes)}"
+            if len(section_nodes) > chunk_size
+            else f"{len(section_nodes)} ITEMS"
+        )
+        rendered = _render_topology_tree(
+            _TopologyTree(
+                (f"{server} / {title}", range_label),
+                tuple(chunk),
+            )
+        )
+        lines.append("")
+        lines.extend(line.rstrip() for line in rendered.lines)
+
+
+def _vm_inventory_node(vm: dict[str, Any], network_name: str | None) -> _TopologyTree:
+    interface_lines: list[str] = []
+    for interface in vm.get("interfaces", []):
+        if not isinstance(interface, dict):
+            continue
+        if network_name is not None and interface.get("network") != network_name:
+            continue
+        details = " / ".join(
+            str(value)
+            for value in (interface.get("model"), interface.get("mac"))
+            if value
+        )
+        if details:
+            interface_lines.append(details)
+    memory = vm.get("memory")
+    memory_unit = vm.get("memory_unit") or ""
+    resource_text = f"{vm.get('vcpus', '?')} vCPU"
+    if memory is not None:
+        resource_text += f" | {memory} {memory_unit}".rstrip()
+    return _TopologyTree(
+        (
+            f"VM {vm.get('name', 'unknown')}",
+            str(vm.get("state", "unknown")).upper(),
+            resource_text,
+            *interface_lines,
+        )
+    )
+
+
+def _container_inventory_node(
+    container: dict[str, Any],
+    network_name: str | None,
+) -> _TopologyTree:
+    address_lines: list[str] = []
+    for network in container.get("networks", []):
+        if not isinstance(network, dict):
+            continue
+        if network_name is not None and network.get("name") != network_name:
+            continue
+        for key in ("ipv4", "ipv6"):
+            if network.get(key):
+                address_lines.append(f"{key.upper()} {network[key]}")
+    port_lines = [
+        f"PORT {port.get('host') or 'internal'} -> {port.get('container')}"
+        for port in container.get("ports", [])
+        if isinstance(port, dict)
+    ]
+    return _TopologyTree(
+        (
+            f"CONTAINER {container.get('name', 'unknown')}",
+            str(container.get("state", "unknown")).upper(),
+            str(container.get("image", "unknown image")),
+            *address_lines,
+            *port_lines,
+        )
+    )
+
+
 def render_path_ascii(graph: AttackGraph, path: ShortestPath) -> str:
     """Render one selected path as an ASCII command-line diagram."""
     nodes = {node.node_id: node for node in graph.nodes}

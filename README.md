@@ -16,6 +16,8 @@ HexPath currently provides:
 - Explicit coverage reporting that distinguishes a clean result from a failed or incomplete lookup.
 - Vantage-aware multi-host reachability modeling.
 - Directed attack-graph construction, ASCII terminal rendering, and Dijkstra path analysis.
+- Full server topology inventory over SSH, including interfaces, listening
+  services, libvirt networks and VMs, and Docker networks and containers.
 
 ## Workflow
 
@@ -122,6 +124,29 @@ hexpath --scope lab.json --from 2001:db8:1::10 2001:db8:1::20
 
 Run `hexpath --help` to see the short workflow and `hexpath assess --help` for
 all direct-scan options.
+
+## Full server topology
+
+Show the complete topology of a server that is already available through SSH:
+
+```sh
+hexpath inventory aiserver
+```
+
+The server is the root of the ASCII diagram. HexPath reads and displays every
+host network interface, listening socket, libvirt network, VM, Docker network,
+and container reported by the server. Running, stopped, attached, and
+unattached resources stay visible.
+
+Keep the terminal diagram and save the same inventory as downloadable JSON:
+
+```sh
+hexpath inventory aiserver -oJ full-topology.json
+```
+
+Omit `aiserver` to inventory the local computer. The inventory is read-only;
+the account running HexPath needs permission to run `virsh`, `docker`, `ip`,
+and `ss` on the selected server.
 
 ## Advanced commands
 

@@ -17,6 +17,7 @@ from hexpath.graph import (
     build_attack_graph,
     render_attack_graph_ascii,
     render_path_ascii,
+    render_server_inventory_ascii,
     render_topology_ascii,
 )
 from hexpath.models import Evidence, EvidenceLevel, Host
@@ -29,6 +30,10 @@ from hexpath.scanner import (
     run_nmap,
 )
 from hexpath.scope import Scope, ScopeError
+from hexpath.virtualization import (
+    VirtualizationError,
+    collect_server_inventory,
+)
 from hexpath.vulnerabilities import (
     CpeIdentity,
     NvdClient,
@@ -41,7 +46,7 @@ from hexpath.vulnerabilities import (
 )
 
 
-_COMMANDS = {"assess", "scope", "scan", "cve", "graph"}
+_COMMANDS = {"assess", "scope", "scan", "cve", "graph", "inventory"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -302,6 +307,32 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="print machine-readable JSON instead of an ASCII path",
+    )
+
+    inventory_parser = subcommands.add_parser(
+        "inventory",
+        help="show every network, VM, container, interface, and listening service",
+    )
+    inventory_parser.add_argument(
+        "ssh_host",
+        nargs="?",
+        help="SSH host to inspect; omit to inspect this computer",
+    )
+    inventory_parser.add_argument(
+        "--timeout",
+        type=int,
+        default=20,
+        help="maximum time for each inventory command in seconds",
+    )
+    inventory_parser.add_argument(
+        "-oJ",
+        "--output-json",
+        help="save the complete server inventory as JSON",
+    )
+    inventory_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="print JSON instead of the terminal ASCII topology",
     )
 
     return parser
@@ -568,7 +599,29 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 1
             print(path.to_json() if args.json else render_path_ascii(graph, path))
             return 0
-    except (ScopeError, ScannerError, VulnerabilityError, GraphError, ValueError) as error:
+        if args.command == "inventory":
+            inventory = collect_server_inventory(
+                ssh_host=args.ssh_host,
+                timeout_seconds=args.timeout,
+            )
+            inventory["schema_version"] = 1
+            if args.output_json:
+                _write_json_file(args.output_json, inventory, "server inventory")
+            if args.json:
+                print(json.dumps(inventory, indent=2, sort_keys=True))
+            else:
+                print(render_server_inventory_ascii(inventory))
+                if args.output_json:
+                    print(f"Saved JSON: {args.output_json}")
+            return 0
+    except (
+        ScopeError,
+        ScannerError,
+        VulnerabilityError,
+        GraphError,
+        VirtualizationError,
+        ValueError,
+    ) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
 

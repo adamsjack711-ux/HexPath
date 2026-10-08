@@ -57,6 +57,34 @@ class QuickCliTests(unittest.TestCase):
         )
         self.assertIn("Created", output.getvalue())
 
+    @patch("hexpath.cli.collect_server_inventory")
+    def test_inventory_prints_ascii_and_saves_json(self, collect_mock) -> None:
+        collect_mock.return_value = {
+            "source": "server-inventory",
+            "server": "aiserver",
+            "connection": "aiserver",
+            "system": {"os": "Ubuntu", "kernel": "Linux"},
+            "interfaces": [],
+            "listening_services": [],
+            "networks": [],
+            "vms": [],
+            "container_networks": [],
+            "containers": [],
+        }
+        result_path = self.directory / "inventory.json"
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(["inventory", "aiserver", "-oJ", str(result_path)])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("HexPath Full Server Topology", output.getvalue())
+        self.assertIn("Saved JSON:", output.getvalue())
+        document = json.loads(result_path.read_text(encoding="utf-8"))
+        self.assertEqual(document["schema_version"], 1)
+        self.assertEqual(document["server"], "aiserver")
+        collect_mock.assert_called_once_with(ssh_host="aiserver", timeout_seconds=20)
+
     @patch("hexpath.cli.check_scan_documents")
     @patch("hexpath.cli.parse_nmap_xml")
     @patch("hexpath.cli.run_nmap", return_value="<nmaprun/>")

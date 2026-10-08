@@ -16,6 +16,7 @@ from hexpath.graph import (
     build_attack_graph,
     render_attack_graph_ascii,
     render_path_ascii,
+    render_server_inventory_ascii,
     render_topology_ascii,
     vulnerability_cost,
 )
@@ -332,6 +333,78 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("empty.lab", rendered)
         self.assertIn("NO SERVICES DISCOVERED", rendered)
         self.assertIn("Scans: 1  Hosts: 2  Services: 2  CVE candidates: 2", rendered)
+
+    def test_server_inventory_renderer_shows_stopped_and_running_resources(self) -> None:
+        inventory = {
+            "server": "aiserver",
+            "system": {"os": "Ubuntu 26.04", "kernel": "Linux 7.0"},
+            "interfaces": [
+                {
+                    "name": "virbr-lab",
+                    "state": "UP",
+                    "master": None,
+                    "addresses": [{"family": "inet6", "address": "fd00::1", "prefixlen": 64}],
+                }
+            ],
+            "listening_services": [
+                {"protocol": "tcp", "state": "LISTEN", "local": "[::]:22", "process": "sshd"}
+            ],
+            "networks": [{"name": "security-lab", "active": True, "bridge": "virbr-lab"}],
+            "vms": [
+                {
+                    "name": "metasploitable3",
+                    "state": "running",
+                    "vcpus": 2,
+                    "memory": 4194304,
+                    "memory_unit": "KiB",
+                    "interfaces": [{"network": "security-lab", "model": "e1000", "mac": "52:54:00:00:00:01"}],
+                },
+                {
+                    "name": "kali-lab",
+                    "state": "shut off",
+                    "vcpus": 2,
+                    "memory": 2097152,
+                    "memory_unit": "KiB",
+                    "interfaces": [{"network": "security-lab", "model": "virtio", "mac": "52:54:00:00:00:02"}],
+                },
+            ],
+            "container_networks": [{"name": "pentest-lab", "driver": "bridge", "subnets": ["172.20.0.0/16"]}],
+            "containers": [
+                {
+                    "name": "juice-shop",
+                    "state": "running",
+                    "image": "bkimminich/juice-shop",
+                    "networks": [{"name": "pentest-lab", "ipv4": "172.20.0.2", "ipv6": None}],
+                    "ports": [{"host": "127.0.0.1:3000", "container": "3000/tcp"}],
+                },
+                {
+                    "name": "stopped-box",
+                    "state": "exited",
+                    "image": "example/box",
+                    "networks": [],
+                    "ports": [],
+                },
+            ],
+        }
+
+        rendered = render_server_inventory_ascii(inventory)
+
+        for expected in (
+            "HexPath Full Server Topology",
+            "aiserver",
+            "virbr-lab",
+            "[::]:22",
+            "metasploitable3",
+            "RUNNING",
+            "kali-lab",
+            "SHUT OFF",
+            "pentest-lab",
+            "juice-shop",
+            "stopped-box",
+            "EXITED",
+            "VMs: 2  Containers: 2",
+        ):
+            self.assertIn(expected, rendered)
 
     def test_ascii_renderer_removes_terminal_control_characters(self) -> None:
         graph = AttackGraph(

@@ -402,7 +402,8 @@ class BuilderTests(unittest.TestCase):
             "juice-shop",
             "stopped-box",
             "EXITED",
-            "VMs: 2  Containers: 2",
+            "2 VMS",
+            "2 CONTAINERS",
         ):
             self.assertIn(expected, rendered)
 

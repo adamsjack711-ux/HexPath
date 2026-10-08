@@ -811,7 +811,7 @@ def _topology_box(labels: tuple[str, ...]) -> list[str]:
 
 
 def render_server_inventory_ascii(document: Any) -> str:
-    """Render complete server inventory in bounded-width top-down sections."""
+    """Render complete server inventory as one tree rooted at the server."""
     if not isinstance(document, dict):
         raise GraphError("server inventory must be an object")
     server = _required_text(document.get("server"), "inventory server")
@@ -825,18 +825,6 @@ def render_server_inventory_ascii(document: Any) -> str:
     vms = _inventory_list(document, "vms")
     container_networks = _inventory_list(document, "container_networks")
     containers = _inventory_list(document, "containers")
-
-    server_tree = _TopologyTree(
-        (
-            "SERVER",
-            server,
-            str(system.get("os", "unknown OS")),
-            str(system.get("kernel", "unknown kernel")),
-        )
-    )
-    server_rendered = _render_topology_tree(server_tree)
-    lines = ["HexPath Full Server Topology", "============================"]
-    lines.extend(line.rstrip() for line in server_rendered.lines)
 
     interface_nodes = tuple(
         _TopologyTree(
@@ -854,7 +842,6 @@ def render_server_inventory_ascii(document: Any) -> str:
         )
         for item in interfaces
     )
-    _append_inventory_section(lines, server, "NETWORK INTERFACES", interface_nodes)
 
     service_nodes = tuple(
         _TopologyTree(
@@ -866,7 +853,6 @@ def render_server_inventory_ascii(document: Any) -> str:
         )
         for item in services
     )
-    _append_inventory_section(lines, server, "LISTENING SERVICES", service_nodes)
 
     vm_by_network: dict[str, list[dict[str, Any]]] = {}
     unattached_vms: list[dict[str, Any]] = []
@@ -904,14 +890,6 @@ def render_server_inventory_ascii(document: Any) -> str:
                 tuple(_vm_inventory_node(vm, None) for vm in unattached_vms),
             )
         )
-    _append_inventory_section(
-        lines,
-        server,
-        "LIBVIRT NETWORKS AND VMS",
-        tuple(libvirt_nodes),
-        chunk_size=2,
-    )
-
     containers_by_network: dict[str, list[dict[str, Any]]] = {}
     unattached_containers: list[dict[str, Any]] = []
     for container in containers:
@@ -946,33 +924,53 @@ def render_server_inventory_ascii(document: Any) -> str:
                 container_nodes,
             )
         )
-    _append_inventory_section(
-        lines,
-        server,
-        "DOCKER NETWORKS",
-        tuple(docker_nodes),
-        chunk_size=2,
-    )
     if unattached_containers:
-        _append_inventory_section(
-            lines,
-            server,
-            "UNATTACHED / STOPPED CONTAINERS",
-            tuple(
-                _container_inventory_node(container, None)
-                for container in unattached_containers
-            ),
+        docker_nodes.append(
+            _TopologyTree(
+                ("UNATTACHED CONTAINERS",),
+                tuple(
+                    _container_inventory_node(container, None)
+                    for container in unattached_containers
+                ),
+            )
         )
 
-    lines.append("")
-    lines.append(
-        f"Interfaces: {len(interfaces)}  Listening services: {len(services)}  "
-        f"VMs: {len(vms)}  Containers: {len(containers)}"
+    root = _TopologyTree(
+        (
+            "SERVER",
+            server,
+            str(system.get("os", "unknown OS")),
+            str(system.get("kernel", "unknown kernel")),
+        ),
+        (
+            _TopologyTree(
+                ("NETWORK INTERFACES", f"{len(interfaces)} TOTAL"),
+                interface_nodes or (_TopologyTree(("NONE FOUND",)),),
+            ),
+            _TopologyTree(
+                ("LISTENING SERVICES", f"{len(services)} TOTAL"),
+                service_nodes or (_TopologyTree(("NONE FOUND",)),),
+            ),
+            _TopologyTree(
+                (
+                    "LIBVIRT",
+                    f"{len(libvirt_networks)} NETWORKS",
+                    f"{len(vms)} VMS",
+                ),
+                tuple(libvirt_nodes) or (_TopologyTree(("NONE FOUND",)),),
+            ),
+            _TopologyTree(
+                (
+                    "DOCKER",
+                    f"{len(container_networks)} NETWORKS",
+                    f"{len(containers)} CONTAINERS",
+                ),
+                tuple(docker_nodes) or (_TopologyTree(("NONE FOUND",)),),
+            ),
+        ),
     )
-    lines.append(
-        f"Libvirt networks: {len(libvirt_networks)}  "
-        f"Docker networks: {len(container_networks)}"
-    )
+    lines = ["HexPath Full Server Topology", "============================"]
+    lines.extend(_render_top_down_inventory_tree(root))
     return "\n".join(lines)
 
 
@@ -983,31 +981,95 @@ def _inventory_list(document: dict[str, Any], key: str) -> list[dict[str, Any]]:
     return value
 
 
-def _append_inventory_section(
+def _render_vertical_topology_tree(tree: _TopologyTree) -> list[str]:
+    """Render a boxed tree without allowing large sibling sets to span columns."""
+    root_box = _topology_box(tree.labels)
+    lines = list(root_box)
+    if not tree.children:
+        return lines
+    root_trunk = " " * (len(root_box[0]) // 2)
+    lines.append(root_trunk + "|")
+    _append_vertical_children(lines, tree.children, root_trunk)
+    return lines
+
+
+def _render_top_down_inventory_tree(tree: _TopologyTree) -> list[str]:
+    """Place inventory categories across the screen beneath one server root."""
+    root_box = _topology_box(tree.labels)
+    if not tree.children:
+        return root_box
+
+    gap = 4
+    child_blocks = [_render_vertical_topology_tree(child) for child in tree.children]
+    child_widths = [max(len(line) for line in block) for block in child_blocks]
+    children_width = sum(child_widths) + gap * (len(child_blocks) - 1)
+    width = max(len(root_box[0]), children_width)
+    root_left = (width - len(root_box[0])) // 2
+    root_center = root_left + len(root_box[0]) // 2
+    children_left = (width - children_width) // 2
+
+    offsets: list[int] = []
+    offset = children_left
+    for child_width in child_widths:
+        offsets.append(offset)
+        offset += child_width + gap
+    child_centers = [
+        offset + len(block[0]) // 2
+        for offset, block in zip(offsets, child_blocks, strict=True)
+    ]
+
+    lines = [(" " * root_left + line).rstrip() for line in root_box]
+    trunk = [" "] * width
+    trunk[root_center] = "|"
+    lines.append("".join(trunk).rstrip())
+
+    branch = [" "] * width
+    left = min(root_center, *child_centers)
+    right = max(root_center, *child_centers)
+    for column in range(left, right + 1):
+        branch[column] = "-"
+    for column in (root_center, *child_centers):
+        branch[column] = "+"
+    lines.append("".join(branch).rstrip())
+
+    stems = [" "] * width
+    for center in child_centers:
+        stems[center] = "|"
+    lines.append("".join(stems).rstrip())
+
+    height = max(len(block) for block in child_blocks)
+    for row_index in range(height):
+        row = [" "] * width
+        for child_offset, child_width, block in zip(
+            offsets,
+            child_widths,
+            child_blocks,
+            strict=True,
+        ):
+            if row_index >= len(block):
+                continue
+            child_line = block[row_index].ljust(child_width)
+            row[child_offset : child_offset + child_width] = child_line
+        lines.append("".join(row).rstrip())
+    return lines
+
+
+def _append_vertical_children(
     lines: list[str],
-    server: str,
-    title: str,
-    nodes: tuple[_TopologyTree, ...],
-    *,
-    chunk_size: int = 4,
+    children: tuple[_TopologyTree, ...],
+    prefix: str,
 ) -> None:
-    section_nodes = nodes or (_TopologyTree(("NONE FOUND",)),)
-    for start in range(0, len(section_nodes), chunk_size):
-        chunk = section_nodes[start : start + chunk_size]
-        end = min(start + chunk_size, len(section_nodes))
-        range_label = (
-            f"{start + 1}-{end} OF {len(section_nodes)}"
-            if len(section_nodes) > chunk_size
-            else f"{len(section_nodes)} ITEMS"
-        )
-        rendered = _render_topology_tree(
-            _TopologyTree(
-                (f"{server} / {title}", range_label),
-                tuple(chunk),
-            )
-        )
-        lines.append("")
-        lines.extend(line.rstrip() for line in rendered.lines)
+    for index, child in enumerate(children):
+        is_last = index == len(children) - 1
+        continuation = "    " if is_last else "|   "
+        box = _topology_box(child.labels)
+        lines.append(prefix + "+-- " + box[0])
+        aligned_prefix = prefix + continuation
+        lines.extend(aligned_prefix + line for line in box[1:])
+        if child.children:
+            child_trunk = aligned_prefix + " " * (len(box[0]) // 2)
+            lines.append(child_trunk + "|")
+            _append_vertical_children(lines, child.children, child_trunk)
 
 
 def _vm_inventory_node(vm: dict[str, Any], network_name: str | None) -> _TopologyTree:

@@ -144,6 +144,17 @@ followed by ranked routes showing total cost, the difference from the cheapest
 route, candidate CVEs, and confidence. `-oJ` and `--json` include this comparison
 under `path_comparison` alongside the scan, CVEs, and graph.
 
+To let HexPath select the most vulnerable reachable host, scan one or more
+targets with network-wide ranking enabled:
+
+```sh
+hexpath --most-vulnerable --rank-limit 10 192.0.2.10 192.0.2.20
+```
+
+HexPath runs Dijkstra once from the entry point, finds the least-cost route to
+every reachable host, and ranks the results. The complete ranking is included
+under `vulnerable_path_ranking` when using `-oJ` or `--json`.
+
 ## Full server topology
 
 Show the complete topology of a server that is already available through SSH:
@@ -264,6 +275,19 @@ hexpath graph path \
   --target host:2001:db8:1::10
 ```
 
+Find the most vulnerable path without selecting a destination first:
+
+```sh
+hexpath graph vulnerable --graph graph.json
+hexpath graph vulnerable --graph graph.json --limit 10 --json
+```
+
+This runs a single-source Dijkstra search and ranks the least-cost route to
+every reachable host. The first result is the modeled most vulnerable route;
+the JSON output includes that path, alternatives, candidate CVE evidence, and
+hosts that have no evidence-backed route. The command returns `1` when no other
+host is reachable from the selected source.
+
 List the available hosts before selecting a target:
 
 ```sh
@@ -302,6 +326,10 @@ therefore continue from the entry point, through a candidate service finding to
 one host, and then through services observed by a scan run from that host.
 
 Candidate exploit costs use `11 - CVSS score`, plus a confidence penalty of `0` for high, `1.5` for medium, or `3` for low confidence. A missing CVSS score uses the neutral value `5.0`. Lower costs are prioritized by Dijkstra's algorithm. These costs rank investigation paths; they are not exploit probabilities.
+
+Network-wide ranking identifies the easiest evidence-backed route in the graph.
+It does not account for business importance, data sensitivity, or blast radius;
+use `graph path --target` when a specific critical asset is the destination.
 
 ## Tests
 

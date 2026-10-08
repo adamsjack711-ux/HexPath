@@ -39,6 +39,11 @@ graph selection, CLI coverage, and documentation. It builds on
 
 Avoid parallel IPv4 or address-family changes until this branch is merged.
 
+`feat/vulnerable-path-ranking` adds network-wide Dijkstra ranking on top of the
+IPv4 branch. It touches the path-analysis section of `src/hexpath/graph.py`, the
+graph and assessment command handling in `src/hexpath/cli.py`, their tests, and
+the README. Avoid parallel path-ranking or Dijkstra changes until it is merged.
+
 ## Review and verification
 
 Commit only the files belonging to your task. Open a separate pull request for

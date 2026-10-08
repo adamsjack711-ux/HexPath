@@ -24,6 +24,8 @@ from hexpath.graph import (
     render_path_comparison_ascii,
     render_server_inventory_ascii,
     render_topology_ascii,
+    render_vulnerable_path_ranking_ascii,
+    vulnerable_path_ranking_document,
 )
 from hexpath.models import Evidence, EvidenceLevel, Host
 from hexpath.scanner import (
@@ -112,13 +114,23 @@ def build_parser() -> argparse.ArgumentParser:
         dest="vantage",
         help="IP host where this scan is being run",
     )
-    assess_parser.add_argument(
+    analysis_group = assess_parser.add_mutually_exclusive_group()
+    analysis_group.add_argument(
         "--target",
         help="IP host to analyze after scanning (address or host:<IP>)",
+    )
+    analysis_group.add_argument(
+        "--most-vulnerable",
+        action="store_true",
+        help="rank the lowest-cost Dijkstra path to every reachable host",
     )
     assess_parser.add_argument(
         "--paths", type=_path_limit, default=3,
         help="maximum routes to compare for --target (1-20; default: 3)",
+    )
+    assess_parser.add_argument(
+        "--rank-limit", type=_path_limit, default=10,
+        help="maximum host paths shown by --most-vulnerable (1-20; default: 10)",
     )
     assess_parser.add_argument(
         "--timeout",
@@ -353,6 +365,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="maximum routes to return (1-20; default: 3)",
     )
     graph_paths_parser.add_argument("--json", action="store_true")
+    graph_vulnerable_parser = graph_commands.add_parser(
+        "vulnerable",
+        help="rank the lowest-cost Dijkstra path to every reachable host",
+    )
+    graph_vulnerable_parser.add_argument(
+        "--graph", required=True, help="graph JSON path",
+    )
+    graph_vulnerable_parser.add_argument(
+        "--source", default=ENTRY_NODE_ID, help="source node ID or IP host address",
+    )
+    graph_vulnerable_parser.add_argument(
+        "--limit", type=_path_limit, default=10,
+        help="maximum ranked host paths to return (1-20; default: 10)",
+    )
+    graph_vulnerable_parser.add_argument("--json", action="store_true")
 
     inventory_parser = subcommands.add_parser(
         "inventory",
@@ -522,12 +549,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "graph": graph.to_dict(),
             }
             paths = ()
+            ranked_paths = ()
             target = None
             if selected_target is not None:
                 target = graph.resolve_node(selected_target)
                 paths = graph.shortest_paths(vantage, target, limit=args.paths)
                 combined_result["path_comparison"] = path_comparison_document(
                     vantage, target, paths, limit=args.paths,
+                )
+            if args.most_vulnerable:
+                ranked_paths = graph.ranked_host_paths(vantage)
+                combined_result["vulnerable_path_ranking"] = (
+                    vulnerable_path_ranking_document(
+                        graph,
+                        vantage,
+                        ranked_paths,
+                        limit=args.rank_limit,
+                    )
                 )
             if args.output_json:
                 _write_json_file(args.output_json, combined_result, "assessment")
@@ -545,9 +583,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if target is not None:
                     print()
                     print(render_path_comparison_ascii(graph, vantage, target, paths))
+                if args.most_vulnerable:
+                    print()
+                    print(
+                        render_vulnerable_path_ranking_ascii(
+                            graph,
+                            vantage,
+                            ranked_paths,
+                            limit=args.rank_limit,
+                        )
+                    )
                 if args.output_json:
                     print(f"Saved JSON: {args.output_json}")
-            return 1 if target is not None and not paths else 0
+            no_selected_path = target is not None and not paths
+            no_ranked_path = args.most_vulnerable and not ranked_paths
+            return 1 if no_selected_path or no_ranked_path else 0
         if args.command == "scope" and args.scope_command == "init":
             scope = Scope.from_dict({"name": args.name, "targets": args.targets})
             output_path = Path(args.output)
@@ -710,6 +760,33 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ))
             else:
                 print(render_path_comparison_ascii(graph, source, target, paths))
+            return 0 if paths else 1
+        if args.command == "graph" and args.graph_command == "vulnerable":
+            graph = AttackGraph.from_dict(_read_json_document(args.graph, "graph"))
+            source = graph.resolve_node(args.source)
+            paths = graph.ranked_host_paths(source)
+            if args.json:
+                print(
+                    json.dumps(
+                        vulnerable_path_ranking_document(
+                            graph,
+                            source,
+                            paths,
+                            limit=args.limit,
+                        ),
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
+            else:
+                print(
+                    render_vulnerable_path_ranking_ascii(
+                        graph,
+                        source,
+                        paths,
+                        limit=args.limit,
+                    )
+                )
             return 0 if paths else 1
         if args.command == "inventory":
             inventory = collect_server_inventory(

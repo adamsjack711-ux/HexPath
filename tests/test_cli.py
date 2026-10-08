@@ -84,6 +84,80 @@ class QuickCliTests(unittest.TestCase):
     @patch("hexpath.cli.check_scan_documents")
     @patch("hexpath.cli.parse_nmap_xml")
     @patch("hexpath.cli.run_nmap", return_value="<nmaprun/>")
+    def test_direct_assessment_ranks_most_vulnerable_host_path(
+        self,
+        _run_mock,
+        parse_mock,
+        check_mock,
+    ) -> None:
+        observed = Evidence(
+            source="test",
+            summary="observed service",
+            level="observed",
+        )
+        inferred = Evidence(
+            source="test",
+            summary="CPE candidate",
+            level="inferred",
+        )
+        service = Service(
+            host="::1",
+            port=22,
+            protocol="tcp",
+            state="open",
+            evidence=(observed,),
+        )
+        parse_mock.return_value = NmapScanResult(
+            hosts=(Host(address="::1", evidence=(observed,)),),
+            services=(service,),
+        )
+        check_mock.return_value.to_dict.return_value = {
+            "vulnerabilities": [
+                {"id": "CVE-2026-12345", "cvss_score": 9.0}
+            ],
+            "matches": [
+                {
+                    "service_id": service.record_id,
+                    "cve_id": "CVE-2026-12345",
+                    "confidence": "medium",
+                    "reason": "Candidate CPE match",
+                    "evidence": [inferred.to_dict()],
+                }
+            ],
+            "coverage": {"services_with_cpe": 0, "services": 1},
+        }
+        check_mock.return_value.matches = (object(),)
+        output = StringIO()
+
+        with redirect_stdout(output):
+            code = main(
+                [
+                    "--scope",
+                    str(self.scope_path),
+                    "--most-vulnerable",
+                    "--rank-limit",
+                    "1",
+                    "--json",
+                    "::1",
+                ]
+            )
+
+        document = json.loads(output.getvalue())
+        ranking = document["vulnerable_path_ranking"]
+        self.assertEqual(code, 0)
+        self.assertEqual(ranking["algorithm"], "dijkstra")
+        self.assertEqual(
+            ranking["most_vulnerable_path"]["target"]["id"],
+            "host:::1",
+        )
+        self.assertEqual(
+            ranking["most_vulnerable_path"]["path"]["total_weight"],
+            4.5,
+        )
+
+    @patch("hexpath.cli.check_scan_documents")
+    @patch("hexpath.cli.parse_nmap_xml")
+    @patch("hexpath.cli.run_nmap", return_value="<nmaprun/>")
     def test_selected_host_without_candidate_path_saves_empty_comparison(
         self, _run_mock, parse_mock, check_mock,
     ) -> None:
@@ -649,6 +723,84 @@ class GraphCliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual([target["reachable"] for target in targets], [True, False])
         self.assertEqual([target["cost"] for target in targets], [2.5, None])
+
+    def test_vulnerable_command_identifies_and_ranks_host_paths(self) -> None:
+        output = StringIO()
+        with redirect_stdout(output):
+            code = main(
+                [
+                    "graph",
+                    "vulnerable",
+                    "--graph",
+                    str(self.comparison_graph_path()),
+                    "--json",
+                ]
+            )
+
+        document = json.loads(output.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(document["algorithm"], "dijkstra")
+        self.assertEqual(
+            document["most_vulnerable_path"]["target"]["id"],
+            "host:2001:db8::1",
+        )
+        self.assertEqual(
+            document["most_vulnerable_path"]["path"]["total_weight"],
+            2.5,
+        )
+        self.assertEqual(
+            [host["id"] for host in document["unreachable_hosts"]],
+            ["host:2001:db8::2"],
+        )
+
+    def test_vulnerable_command_renders_most_vulnerable_route(self) -> None:
+        output = StringIO()
+        with redirect_stdout(output):
+            code = main(
+                [
+                    "graph",
+                    "vulnerable",
+                    "--graph",
+                    str(self.comparison_graph_path()),
+                    "--limit",
+                    "1",
+                ]
+            )
+
+        self.assertEqual(code, 0)
+        self.assertIn("HexPath Most Vulnerable Path", output.getvalue())
+        self.assertIn("CVE-2026-12341 (medium)", output.getvalue())
+        self.assertIn("Total cost: 2.50", output.getvalue())
+
+    def test_vulnerable_command_returns_one_when_no_host_is_reachable(self) -> None:
+        graph_path = self.directory / "unreachable.json"
+        graph_path.write_text(
+            json.dumps(
+                {
+                    "nodes": [
+                        {"id": "entry:scanner", "kind": "entry", "label": "entry"},
+                        {"id": "host:192.0.2.10", "kind": "host", "label": "target"},
+                    ],
+                    "edges": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        output = StringIO()
+
+        with redirect_stdout(output):
+            code = main(
+                [
+                    "graph",
+                    "vulnerable",
+                    "--graph",
+                    str(graph_path),
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(code, 1)
+        self.assertIsNone(json.loads(output.getvalue())["most_vulnerable_path"])
 
     def test_comparison_reports_missing_and_unreachable_targets(self) -> None:
         graph_path = self.comparison_graph_path()

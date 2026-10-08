@@ -16,6 +16,7 @@ HexPath currently provides:
 - Explicit coverage reporting that distinguishes a clean result from a failed or incomplete lookup.
 - Vantage-aware multi-host reachability modeling.
 - Directed attack-graph construction, ASCII terminal rendering, and Dijkstra path analysis.
+- Operator-selected targets and ranked comparison of evidence-backed, loop-free routes.
 - Full server topology inventory over SSH, including interfaces, listening
   services, libvirt networks and VMs, and Docker networks and containers.
 
@@ -124,6 +125,17 @@ hexpath --scope lab.json --from 2001:db8:1::10 2001:db8:1::20
 
 Run `hexpath --help` to see the short workflow and `hexpath assess --help` for
 all direct-scan options.
+
+Select a host to compare up to three modeled routes after the assessment:
+
+```sh
+hexpath --target 2001:db8:1::10 --paths 3 2001:db8:1::10
+```
+
+The selected target is scope-checked before scanning. The topology stays visible,
+followed by ranked routes showing total cost, the difference from the cheapest
+route, candidate CVEs, and confidence. `-oJ` and `--json` include this comparison
+under `path_comparison` alongside the scan, CVEs, and graph.
 
 ## Full server topology
 
@@ -243,6 +255,36 @@ hexpath graph path \
   --target host:2001:db8:1::10
 ```
 
+List the available hosts before selecting a target:
+
+```sh
+hexpath graph targets --graph graph.json
+```
+
+The list includes hosts without a modeled path. Its reachability status describes
+the evidence-backed attack graph, rather than whether a host responds to network
+traffic. Use `--source` to list reachability from a different entry or host.
+
+Compare several routes to the same host, using an IPv6 address or an exact node ID:
+
+```sh
+hexpath graph paths --graph graph.json --target 2001:db8:1::10 --limit 3
+hexpath graph paths --graph graph.json --target 2001:db8:1::10 --limit 3 --json
+```
+
+Routes are ordered by total cost and never revisit a node. Alternative CVEs on
+the same service remain distinct routes. The limit defaults to three and accepts
+values from one to twenty; fewer routes are returned when fewer exist. Spur
+searches use Dijkstra within Yen's algorithm, without enumerating all possible
+routes. Each JSON route retains its nodes, edges, and supporting evidence, with
+an added `rank` and `cost_delta`.
+
+`graph paths` returns exit code `0` when a route exists, `1` when the known target
+has no directed path, and `2` for invalid input or an unknown target. A comparison
+without a route returns an empty JSON `paths` list. The direct assessment uses
+these same exit codes when `--target` is supplied. `graph path` keeps its original
+single-route JSON format. These commands also accept an IPv6 address for `--source`.
+
 The terminal output uses ASCII branches and arrows. Pass `--json` to `graph build` or `graph path` when another program needs machine-readable output.
 
 Each scan contributes reachability only from its recorded vantage. A path can
@@ -263,8 +305,3 @@ python -m unittest discover --start-directory tests --verbose
 2. Use [Issues](https://github.com/adamsjack711-ux/HexPath/issues) to propose ideas, track tasks, and report problems. Add enough context for a teammate to pick up the work.
 3. Work on a separate branch and open a pull request into the default branch. Ask a teammate to review it before merging.
 4. Keep this README updated as we agree on the scope and how to run the tool.
-
-## Next milestone
-
-Add operator-supplied target selection and clearer path comparison when several
-evidence-backed routes reach the same host.

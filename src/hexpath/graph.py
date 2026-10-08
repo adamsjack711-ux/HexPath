@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 import heapq
+from ipaddress import IPv6Address
 import json
 import math
 import textwrap
@@ -159,6 +160,87 @@ class AttackGraph:
 
     def shortest_path(self, source: str, target: str) -> ShortestPath | None:
         """Return the minimum-cost directed path using Dijkstra's algorithm."""
+        return self._shortest_path(source, target)
+
+    def resolve_node(self, selector: str) -> str:
+        """Resolve an exact node ID or an equivalent IPv6 host address."""
+        if any(node.node_id == selector for node in self.nodes):
+            return selector
+        try:
+            address = IPv6Address(selector.removeprefix("host:"))
+        except ValueError:
+            raise GraphError(
+                f"unknown node {selector!r}; use 'hexpath graph targets' to list hosts"
+            ) from None
+        for node in self.nodes:
+            if node.kind != NodeKind.HOST:
+                continue
+            try:
+                node_address = IPv6Address(node.node_id.removeprefix("host:"))
+            except ValueError:
+                continue
+            if node_address == address:
+                return node.node_id
+        raise GraphError(
+            f"unknown host {selector!r}; use 'hexpath graph targets' to list hosts"
+        )
+
+    def shortest_paths(
+        self, source: str, target: str, *, limit: int = 3,
+    ) -> tuple[ShortestPath, ...]:
+        """Return up to 20 cheapest loop-free paths using Yen's algorithm.
+
+        Edge identities distinguish alternative CVEs on the same service.
+        Spur searches use Dijkstra; paths never revisit a node.
+        """
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
+            raise GraphError("path limit must be an integer between 1 and 20")
+        first = self.shortest_path(source, target)
+        if first is None:
+            return ()
+        selected = [first]
+        candidates: list[tuple[float, tuple[str, ...], ShortestPath]] = []
+        seen = {tuple(edge.edge_id for edge in first.edges)}
+        while len(selected) < limit:
+            previous = selected[-1]
+            for index, spur_node in enumerate(previous.nodes[:-1]):
+                root_edges = previous.edges[:index]
+                root_ids = tuple(edge.edge_id for edge in root_edges)
+                excluded_edges = {
+                    path.edges[index].edge_id
+                    for path in selected
+                    if len(path.edges) > index
+                    and tuple(edge.edge_id for edge in path.edges[:index]) == root_ids
+                }
+                spur = self._shortest_path(
+                    spur_node, target,
+                    excluded_nodes=frozenset(previous.nodes[:index]),
+                    excluded_edges=frozenset(excluded_edges),
+                )
+                if spur is None:
+                    continue
+                edges = root_edges + spur.edges
+                identity = tuple(edge.edge_id for edge in edges)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                weight = math.fsum(edge.weight for edge in edges)
+                path = ShortestPath(
+                    nodes=previous.nodes[:index] + spur.nodes,
+                    edges=edges,
+                    total_weight=round(weight, 4),
+                )
+                heapq.heappush(candidates, (weight, identity, path))
+            if not candidates:
+                break
+            selected.append(heapq.heappop(candidates)[2])
+        return tuple(selected)
+
+    def _shortest_path(
+        self, source: str, target: str, *,
+        excluded_nodes: frozenset[str] = frozenset(),
+        excluded_edges: frozenset[str] = frozenset(),
+    ) -> ShortestPath | None:
         node_ids = {node.node_id for node in self.nodes}
         if source not in node_ids:
             raise GraphError(f"unknown source node {source!r}")
@@ -169,7 +251,14 @@ class AttackGraph:
 
         adjacency: dict[str, list[GraphEdge]] = {node_id: [] for node_id in node_ids}
         for edge in self.edges:
-            adjacency[edge.source].append(edge)
+            if (
+                edge.edge_id not in excluded_edges
+                and edge.source not in excluded_nodes
+                and edge.target not in excluded_nodes
+            ):
+                adjacency[edge.source].append(edge)
+        for outgoing in adjacency.values():
+            outgoing.sort(key=lambda edge: edge.edge_id)
 
         distances = {source: 0.0}
         previous: dict[str, GraphEdge] = {}
@@ -1141,6 +1230,70 @@ def render_path_ascii(graph: AttackGraph, path: ShortestPath) -> str:
         lines.append(f"      {_ascii_node(nodes[edge.target])}")
     lines.append("")
     lines.append(f"Total cost: {path.total_weight:.2f}")
+    return "\n".join(lines)
+
+
+def render_host_targets_ascii(source: str, targets: list[dict[str, Any]]) -> str:
+    """Show host selectors, names, and costs with safe terminal text."""
+    lines = ["HexPath Host Targets", f"Source: {_terminal_text(source)}"]
+    for item in targets:
+        status = f"cost={item['cost']:.2f}" if item["reachable"] else "no modeled path"
+        hostnames = item.get("hostnames", [])
+        names = ", ".join(
+            _terminal_text(name) for name in hostnames if isinstance(name, str)
+        ) if isinstance(hostnames, list) else ""
+        suffix = f" | {names}" if names else ""
+        lines.append(f"  {_terminal_text(item['id'])} | {status}{suffix}")
+    if not targets:
+        lines.append("No host targets in this graph.")
+    lines.append("Reachability here requires evidence-backed graph transitions.")
+    return "\n".join(lines)
+
+
+def path_comparison_document(
+    source: str, target: str, paths: tuple[ShortestPath, ...], *, limit: int,
+) -> dict[str, Any]:
+    """Serialize ranked routes while retaining every edge's evidence."""
+    best_cost = paths[0].total_weight if paths else 0.0
+    return {
+        "source": source,
+        "target": target,
+        "requested_paths": limit,
+        "paths": [
+            {
+                **path.to_dict(),
+                "rank": rank,
+                "cost_delta": round(path.total_weight - best_cost, 4),
+            }
+            for rank, path in enumerate(paths, 1)
+        ],
+    }
+
+
+def render_path_comparison_ascii(
+    graph: AttackGraph, source: str, target: str, paths: tuple[ShortestPath, ...],
+) -> str:
+    """Compare route cost, candidate CVEs, confidence, and complete transitions."""
+    lines = ["HexPath Path Comparison", "======================="]
+    lines.append(f"Source: {_terminal_text(source)}")
+    lines.append(f"Target: {_terminal_text(target)}")
+    if not paths:
+        lines.append("No evidence-backed directed path in this graph.")
+        return "\n".join(lines)
+    lines.extend(["", "Rank  Cost     Delta    Candidate findings"])
+    for rank, path in enumerate(paths, 1):
+        findings = "; ".join(
+            f"{_terminal_text(str(edge.metadata['cve_id']))} "
+            f"({_terminal_text(str(edge.metadata.get('confidence', 'unknown')))})"
+            for edge in path.edges if edge.metadata.get("cve_id")
+        ) or "No candidate CVE transitions"
+        delta = path.total_weight - paths[0].total_weight
+        lines.append(f"{rank:<4}  {path.total_weight:<7.2f}  +{delta:<7.2f} {findings}")
+    for rank, path in enumerate(paths, 1):
+        lines.append("")
+        rendered = render_path_ascii(graph, path).splitlines()
+        lines.extend([f"Route {rank}", *rendered[2:]])
+    lines.extend(["", "Costs rank investigation routes; candidate CVEs do not confirm exploitation."])
     return "\n".join(lines)
 
 

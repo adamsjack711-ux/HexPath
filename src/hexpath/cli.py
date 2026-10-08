@@ -14,9 +14,13 @@ from hexpath.graph import (
     ENTRY_NODE_ID,
     AttackGraph,
     GraphError,
+    NodeKind,
     build_attack_graph,
+    path_comparison_document,
     render_attack_graph_ascii,
+    render_host_targets_ascii,
     render_path_ascii,
+    render_path_comparison_ascii,
     render_server_inventory_ascii,
     render_topology_ascii,
 )
@@ -99,6 +103,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--from",
         dest="vantage",
         help="IPv6 host where this scan is being run",
+    )
+    assess_parser.add_argument(
+        "--target",
+        help="IPv6 host to analyze after scanning (address or host:<IPv6>)",
+    )
+    assess_parser.add_argument(
+        "--paths", type=_path_limit, default=3,
+        help="maximum routes to compare for --target (1-20; default: 3)",
     )
     assess_parser.add_argument(
         "--timeout",
@@ -300,14 +312,39 @@ def build_parser() -> argparse.ArgumentParser:
     graph_path_parser.add_argument(
         "--source",
         default=ENTRY_NODE_ID,
-        help="source node identifier",
+        help="source node identifier or IPv6 host address",
     )
-    graph_path_parser.add_argument("--target", required=True, help="target node identifier")
+    graph_path_parser.add_argument(
+        "--target", required=True, help="target node identifier or IPv6 address",
+    )
     graph_path_parser.add_argument(
         "--json",
         action="store_true",
         help="print machine-readable JSON instead of an ASCII path",
     )
+    graph_targets_parser = graph_commands.add_parser(
+        "targets", help="list host targets and their modeled reachability",
+    )
+    graph_targets_parser.add_argument("--graph", required=True, help="graph JSON path")
+    graph_targets_parser.add_argument(
+        "--source", default=ENTRY_NODE_ID, help="source node ID or IPv6 host address",
+    )
+    graph_targets_parser.add_argument("--json", action="store_true")
+    graph_paths_parser = graph_commands.add_parser(
+        "paths", help="compare the cheapest evidence-backed loop-free routes",
+    )
+    graph_paths_parser.add_argument("--graph", required=True, help="graph JSON path")
+    graph_paths_parser.add_argument(
+        "--source", default=ENTRY_NODE_ID, help="source node ID or IPv6 host address",
+    )
+    graph_paths_parser.add_argument(
+        "--target", required=True, help="node ID or IPv6 host address",
+    )
+    graph_paths_parser.add_argument(
+        "--limit", type=_path_limit, default=3,
+        help="maximum routes to return (1-20; default: 3)",
+    )
+    graph_paths_parser.add_argument("--json", action="store_true")
 
     inventory_parser = subcommands.add_parser(
         "inventory",
@@ -336,6 +373,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     return parser
+
+
+def _path_limit(value: str) -> int:
+    try:
+        limit = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "path limit must be an integer between 1 and 20"
+        ) from None
+    if not 1 <= limit <= 20:
+        raise argparse.ArgumentTypeError("path limit must be an integer between 1 and 20")
+    return limit
 
 
 def _read_json_document(path: str, document_name: str) -> object:
@@ -421,6 +470,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "assess":
             scope = _load_quick_scope(args.scope)
+            selected_target = (
+                str(scope.require_authorized(args.target.removeprefix("host:")))
+                if args.target else None
+            )
             raw_vantage = args.vantage or ENTRY_NODE_ID
             if raw_vantage != ENTRY_NODE_ID and not raw_vantage.startswith("host:"):
                 raw_vantage = f"host:{raw_vantage}"
@@ -455,6 +508,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "cves": cve_document,
                 "graph": graph.to_dict(),
             }
+            paths = ()
+            target = None
+            if selected_target is not None:
+                target = graph.resolve_node(selected_target)
+                paths = graph.shortest_paths(vantage, target, limit=args.paths)
+                combined_result["path_comparison"] = path_comparison_document(
+                    vantage, target, paths, limit=args.paths,
+                )
             if args.output_json:
                 _write_json_file(args.output_json, combined_result, "assessment")
             if args.json:
@@ -468,9 +529,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"{coverage['services_with_cpe']}/{coverage['services']} services "
                     f"with CPE; {len(cve_result.matches)} candidate matches"
                 )
+                if target is not None:
+                    print()
+                    print(render_path_comparison_ascii(graph, vantage, target, paths))
                 if args.output_json:
                     print(f"Saved JSON: {args.output_json}")
-            return 0
+            return 1 if target is not None and not paths else 0
         if args.command == "scope" and args.scope_command == "init":
             scope = Scope.from_dict({"name": args.name, "targets": args.targets})
             output_path = Path(args.output)
@@ -580,6 +644,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "graph" and args.graph_command == "path":
             graph = AttackGraph.from_dict(_read_json_document(args.graph, "graph"))
+            args.source = graph.resolve_node(args.source)
+            args.target = graph.resolve_node(args.target)
             path = graph.shortest_path(args.source, args.target)
             if path is None:
                 if args.json:
@@ -599,6 +665,39 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 1
             print(path.to_json() if args.json else render_path_ascii(graph, path))
             return 0
+        if args.command == "graph" and args.graph_command == "targets":
+            graph = AttackGraph.from_dict(_read_json_document(args.graph, "graph"))
+            source = graph.resolve_node(args.source)
+            targets = []
+            for node in sorted(graph.nodes, key=lambda node: node.node_id):
+                if node.kind != NodeKind.HOST:
+                    continue
+                path = graph.shortest_path(source, node.node_id)
+                targets.append({
+                    "id": node.node_id,
+                    "label": node.label,
+                    "hostnames": node.metadata.get("hostnames", []),
+                    "reachable": path is not None,
+                    "cost": path.total_weight if path else None,
+                })
+            if args.json:
+                print(json.dumps({"source": source, "targets": targets}, indent=2, sort_keys=True))
+            else:
+                print(render_host_targets_ascii(source, targets))
+            return 0
+        if args.command == "graph" and args.graph_command == "paths":
+            graph = AttackGraph.from_dict(_read_json_document(args.graph, "graph"))
+            source = graph.resolve_node(args.source)
+            target = graph.resolve_node(args.target)
+            paths = graph.shortest_paths(source, target, limit=args.limit)
+            if args.json:
+                print(json.dumps(
+                    path_comparison_document(source, target, paths, limit=args.limit),
+                    indent=2, sort_keys=True,
+                ))
+            else:
+                print(render_path_comparison_ascii(graph, source, target, paths))
+            return 0 if paths else 1
         if args.command == "inventory":
             inventory = collect_server_inventory(
                 ssh_host=args.ssh_host,

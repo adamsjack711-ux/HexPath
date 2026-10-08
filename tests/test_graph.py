@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import random
 import unittest
 
 from hexpath.graph import (
@@ -16,6 +17,7 @@ from hexpath.graph import (
     build_attack_graph,
     render_attack_graph_ascii,
     render_path_ascii,
+    render_path_comparison_ascii,
     render_server_inventory_ascii,
     render_topology_ascii,
     vulnerability_cost,
@@ -168,7 +170,86 @@ class DijkstraTests(unittest.TestCase):
             GraphEdge("bad", "a", "b", "transition", 0, "invalid", (evidence(),))
 
 
+class PathComparisonTests(unittest.TestCase):
+    def test_preserves_parallel_edges_and_excludes_cycles(self) -> None:
+        graph = AttackGraph(
+            nodes=tuple(GraphNode(name, NodeKind.HOST, name) for name in ("s", "a", "t")),
+            edges=tuple(
+                GraphEdge(name, source, target, "transition", weight, name, (evidence(),))
+                for name, source, target, weight in (
+                    ("sa", "s", "a", 1), ("as", "a", "s", 1),
+                    ("at-1", "a", "t", 2), ("at-2", "a", "t", 4),
+                    ("st", "s", "t", 9), ("aa", "a", "a", 1),
+                )
+            ),
+        )
+        paths = graph.shortest_paths("s", "t", limit=20)
+        self.assertEqual([path.total_weight for path in paths], [3, 5, 9])
+        self.assertEqual(paths[0].nodes, paths[1].nodes)
+        self.assertNotEqual(paths[0].edges[-1].edge_id, paths[1].edges[-1].edge_id)
+        self.assertTrue(all(len(path.nodes) == len(set(path.nodes)) for path in paths))
+        self.assertEqual(graph.shortest_paths("t", "s"), ())
+        self.assertEqual(graph.shortest_paths("s", "s")[0].nodes, ("s",))
+        self.assertEqual(len(graph.shortest_paths("s", "t", limit=1)), 1)
+        with self.assertRaisesRegex(GraphError, "unknown target"):
+            graph.shortest_paths("s", "missing")
+        for limit in (0, 21, True, 1.5):
+            with self.subTest(limit=limit), self.assertRaises(GraphError):
+                graph.shortest_paths("s", "t", limit=limit)
+
+    def test_ranked_costs_match_exhaustive_simple_paths(self) -> None:
+        rng = random.Random(719)
+        for case in range(30):
+            names = ("s", "a", "b", "c", "t")
+            edges = []
+            for source in names:
+                for target in names:
+                    if source != target and rng.random() < 0.4:
+                        for parallel in range(rng.randint(1, 2)):
+                            name = f"{source}-{target}-{parallel}"
+                            edges.append(GraphEdge(
+                                name, source, target, "transition", rng.randint(1, 9),
+                                name, (evidence(),),
+                            ))
+            graph = AttackGraph(
+                nodes=tuple(GraphNode(name, NodeKind.HOST, name) for name in names),
+                edges=tuple(edges),
+            )
+            expected = []
+
+            def enumerate_paths(node, visited, cost):
+                if node == "t":
+                    expected.append(cost)
+                    return
+                for edge in edges:
+                    if edge.source == node and edge.target not in visited:
+                        enumerate_paths(edge.target, visited | {edge.target}, cost + edge.weight)
+
+            enumerate_paths("s", {"s"}, 0)
+            with self.subTest(case=case):
+                paths = graph.shortest_paths("s", "t", limit=20)
+                self.assertEqual([path.total_weight for path in paths], sorted(expected)[:20])
+                identities = [tuple(edge.edge_id for edge in path.edges) for path in paths]
+                self.assertEqual(len(identities), len(set(identities)))
+                reversed_graph = AttackGraph(nodes=graph.nodes, edges=tuple(reversed(edges)))
+                self.assertEqual(paths, reversed_graph.shortest_paths("s", "t", limit=20))
+
+
 class BuilderTests(unittest.TestCase):
+    def test_compares_candidate_routes_with_cost_and_confidence(self) -> None:
+        scan, cves = sample_documents()
+        graph = build_attack_graph(scan, cves)
+        target = graph.resolve_node("2001:0db8:0:0:0:0:0:10")
+        paths = graph.shortest_paths(ENTRY_NODE_ID, target)
+
+        self.assertEqual([path.total_weight for path in paths], [4.5, 7.0])
+        self.assertEqual(paths[0], graph.shortest_path(ENTRY_NODE_ID, target))
+        rendered = render_path_comparison_ascii(graph, ENTRY_NODE_ID, target, paths)
+        self.assertIn("+2.50", rendered)
+        self.assertIn("CVE-2024-6387 (medium)", rendered)
+        self.assertIn("CVE-2026-12345 (high)", rendered)
+        self.assertIn("Route 2", rendered)
+
     def test_builds_graph_and_selects_best_candidate_path(self) -> None:
         scan, cves = sample_documents()
 
@@ -274,6 +355,9 @@ class BuilderTests(unittest.TestCase):
             ),
         )
         self.assertEqual(path.total_weight, 10.0)
+        alternatives = graph.shortest_paths(ENTRY_NODE_ID, "host:2001:db8::20")
+        self.assertEqual([route.total_weight for route in alternatives], [10.0, 12.5])
+        self.assertTrue(all(route.edges[-1].metadata["cve_id"] == "CVE-2026-22222" for route in alternatives))
         rendered = render_path_ascii(graph, path)
         self.assertIn("CVE-2024-6387", rendered)
         self.assertIn("CVE-2026-22222", rendered)

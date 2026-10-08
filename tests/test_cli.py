@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from hexpath.cli import main
+from hexpath.models import Evidence, Host, Service
 from hexpath.scanner import NmapScanResult
 from hexpath.vulnerabilities import (
     CpeIdentity,
@@ -32,6 +33,80 @@ class QuickCliTests(unittest.TestCase):
             json.dumps({"name": "loopback", "targets": ["::1/128"]}),
             encoding="utf-8",
         )
+
+    @patch("hexpath.cli.run_nmap")
+    def test_selected_target_is_scope_checked_before_scanning(self, run_mock) -> None:
+        errors = StringIO()
+        with redirect_stderr(errors):
+            code = main([
+                "--scope", str(self.scope_path), "--target", "2001:db8::2", "::1",
+            ])
+        self.assertEqual(code, 2)
+        self.assertIn("outside authorized scope", errors.getvalue())
+        run_mock.assert_not_called()
+
+    @patch("hexpath.cli.check_scan_documents")
+    @patch("hexpath.cli.parse_nmap_xml")
+    @patch("hexpath.cli.run_nmap", return_value="<nmaprun/>")
+    def test_selected_target_prints_and_saves_candidate_route(
+        self, _run_mock, parse_mock, check_mock,
+    ) -> None:
+        observed = Evidence(source="test", summary="observed service", level="observed")
+        inferred = Evidence(source="test", summary="CPE candidate", level="inferred")
+        service = Service(host="::1", port=22, protocol="tcp", state="open", evidence=(observed,))
+        parse_mock.return_value = NmapScanResult(
+            hosts=(Host(address="::1", evidence=(observed,)),), services=(service,),
+        )
+        check_mock.return_value.to_dict.return_value = {
+            "vulnerabilities": [{"id": "CVE-2026-12345", "cvss_score": 9.0}],
+            "matches": [{
+                "service_id": service.record_id, "cve_id": "CVE-2026-12345",
+                "confidence": "medium", "reason": "Candidate CPE match",
+                "evidence": [inferred.to_dict()],
+            }],
+            "coverage": {"services_with_cpe": 0, "services": 1},
+        }
+        check_mock.return_value.matches = (object(),)
+        result_path = self.directory / "candidate.json"
+        output = StringIO()
+        with redirect_stdout(output):
+            code = main([
+                "--scope", str(self.scope_path), "--target", "::1", "--paths", "2",
+                "-oJ", str(result_path), "::1",
+            ])
+        self.assertEqual(code, 0)
+        self.assertIn("HexPath Network Topology", output.getvalue())
+        self.assertIn("HexPath Path Comparison", output.getvalue())
+        document = json.loads(result_path.read_text())
+        self.assertEqual(document["path_comparison"]["requested_paths"], 2)
+        self.assertEqual(document["path_comparison"]["paths"][0]["total_weight"], 4.5)
+
+    @patch("hexpath.cli.check_scan_documents")
+    @patch("hexpath.cli.parse_nmap_xml")
+    @patch("hexpath.cli.run_nmap", return_value="<nmaprun/>")
+    def test_selected_host_without_candidate_path_saves_empty_comparison(
+        self, _run_mock, parse_mock, check_mock,
+    ) -> None:
+        parse_mock.return_value = NmapScanResult(
+            hosts=(Host(address="::1", evidence=(Evidence(source="test", summary="observed", level="observed"),)),),
+            services=(),
+        )
+        check_mock.return_value = ScanVulnerabilityResult(
+            checks=(), vulnerabilities=(), matches=(), service_count=0,
+        )
+        result_path = self.directory / "selected.json"
+        output = StringIO()
+        with redirect_stdout(output):
+            code = main([
+                "--scope", str(self.scope_path), "--target", "host:::1",
+                "-oJ", str(result_path), "--json", "::1",
+            ])
+        self.assertEqual(code, 1)
+        document = json.loads(output.getvalue())
+        self.assertEqual(document["path_comparison"], {
+            "source": "entry:scanner", "target": "host:::1", "paths": [], "requested_paths": 3,
+        })
+        self.assertEqual(document, json.loads(result_path.read_text()))
 
     def test_scope_init_creates_default_format(self) -> None:
         output_path = self.directory / "new-scope.json"
@@ -433,6 +508,83 @@ class GraphCliTests(unittest.TestCase):
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
         self.directory = Path(self.temporary_directory.name)
+
+    def comparison_graph_path(self) -> Path:
+        path = self.directory / "comparison.json"
+        path.write_text(json.dumps({
+            "nodes": [
+                {"id": "entry:scanner", "kind": "entry", "label": "entry"},
+                {"id": "host:2001:db8::1", "kind": "host", "label": "target"},
+                {"id": "host:2001:db8::2", "kind": "host", "label": "isolated"},
+            ],
+            "edges": [
+                {
+                    "id": f"edge-{index}", "source": "entry:scanner",
+                    "target": "host:2001:db8::1", "relationship": "candidate_exploit",
+                    "weight": cost, "description": "candidate transition",
+                    "evidence": [{
+                        "source": "test", "summary": "candidate evidence", "level": "inferred",
+                        "collected_at": "2026-10-08T18:30:00+00:00", "reference": None,
+                    }],
+                    "metadata": {"cve_id": f"CVE-2026-1234{index}", "confidence": "medium"},
+                }
+                for index, cost in enumerate((2.5, 4.0), 1)
+            ],
+        }), encoding="utf-8")
+        return path
+
+    def test_comparison_json_ranks_paths_and_preserves_evidence(self) -> None:
+        output = StringIO()
+        with redirect_stdout(output):
+            code = main([
+                "graph", "paths", "--graph", str(self.comparison_graph_path()),
+                "--target", "2001:0db8::1", "--json",
+            ])
+        document = json.loads(output.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(document["target"], "host:2001:db8::1")
+        self.assertEqual([path["rank"] for path in document["paths"]], [1, 2])
+        self.assertEqual([path["cost_delta"] for path in document["paths"]], [0, 1.5])
+        self.assertEqual(document["paths"][0]["edges"][0]["evidence"][0]["level"], "inferred")
+
+    def test_comparison_ascii_shows_findings_and_cost(self) -> None:
+        output = StringIO()
+        with redirect_stdout(output):
+            code = main([
+                "graph", "paths", "--graph", str(self.comparison_graph_path()),
+                "--target", "2001:db8::1", "--limit", "1",
+            ])
+        self.assertEqual(code, 0)
+        self.assertIn("CVE-2026-12341 (medium)", output.getvalue())
+        self.assertIn("Total cost: 2.50", output.getvalue())
+        self.assertNotIn("Route 2", output.getvalue())
+
+    def test_targets_include_unreachable_hosts(self) -> None:
+        output = StringIO()
+        with redirect_stdout(output):
+            code = main(["graph", "targets", "--graph", str(self.comparison_graph_path()), "--json"])
+        targets = json.loads(output.getvalue())["targets"]
+        self.assertEqual(code, 0)
+        self.assertEqual([target["reachable"] for target in targets], [True, False])
+        self.assertEqual([target["cost"] for target in targets], [2.5, None])
+
+    def test_comparison_reports_missing_and_unreachable_targets(self) -> None:
+        graph_path = self.comparison_graph_path()
+        output = StringIO()
+        with redirect_stdout(output):
+            code = main(["graph", "paths", "--graph", str(graph_path), "--target", "2001:db8::2", "--json"])
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(output.getvalue())["paths"], [])
+        errors = StringIO()
+        with redirect_stderr(errors):
+            code = main(["graph", "paths", "--graph", str(graph_path), "--target", "2001:db8::9"])
+        self.assertEqual(code, 2)
+        self.assertIn("graph targets", errors.getvalue())
+
+    def test_comparison_rejects_unbounded_limits(self) -> None:
+        with redirect_stderr(StringIO()), self.assertRaises(SystemExit) as exit_error:
+            main(["graph", "paths", "--graph", "unused.json", "--target", "::1", "--limit", "21"])
+        self.assertEqual(exit_error.exception.code, 2)
 
     def test_build_writes_attack_graph_json(self) -> None:
         scan_path = self.directory / "scan.json"

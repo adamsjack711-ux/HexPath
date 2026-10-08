@@ -140,7 +140,7 @@ def _validate_ports(value: str) -> str:
         if not item:
             raise ScannerError("port list cannot contain empty entries")
         bounds = item.split("-")
-        if len(bounds) > 2:
+        if len(bounds) > 2 or any(not bound for bound in bounds):
             raise ScannerError(f"invalid port range {item!r}")
         numbers = [int(bound) for bound in bounds]
         if any(number < 1 or number > 65535 for number in numbers):

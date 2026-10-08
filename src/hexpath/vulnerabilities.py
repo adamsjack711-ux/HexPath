@@ -299,7 +299,7 @@ class OsvClient:
             raise VulnerabilityError("max_response_bytes must be greater than zero")
         self.timeout_seconds = timeout_seconds
         self.max_response_bytes = max_response_bytes
-        self._transport = transport or _read_response
+        self._transport = transport or _response_reader("OSV")
 
     def query_package(self, package: PackageIdentity) -> tuple[OsvAdvisory, ...]:
         payload = json.dumps(
@@ -356,7 +356,7 @@ class NvdClient:
         self.timeout_seconds = timeout_seconds
         self.max_response_bytes = max_response_bytes
         self.api_key = api_key.strip() if api_key and api_key.strip() else None
-        self._transport = transport or _read_response
+        self._transport = transport or _response_reader("NVD")
 
     def query_cpe(self, cpe: CpeIdentity) -> tuple[Vulnerability, ...]:
         query = urlencode({"cpeName": cpe.value})
@@ -528,7 +528,27 @@ def check_scan_documents(
     )
 
 
-def _read_response(request: Request, timeout_seconds: float, max_bytes: int) -> bytes:
+def _response_reader(provider: str) -> Transport:
+    """Return a bounded HTTP transport whose errors name the given provider."""
+
+    def read(request: Request, timeout_seconds: float, max_bytes: int) -> bytes:
+        return _read_response(
+            request,
+            timeout_seconds,
+            max_bytes,
+            provider=provider,
+        )
+
+    return read
+
+
+def _read_response(
+    request: Request,
+    timeout_seconds: float,
+    max_bytes: int,
+    *,
+    provider: str = "OSV",
+) -> bytes:
     try:
         with urlopen(request, timeout=timeout_seconds) as response:
             raw_length = response.headers.get("Content-Length")
@@ -537,20 +557,24 @@ def _read_response(request: Request, timeout_seconds: float, max_bytes: int) -> 
                     content_length = int(raw_length)
                 except ValueError as error:
                     raise VulnerabilityLookupError(
-                        "OSV returned an invalid Content-Length header"
+                        f"{provider} returned an invalid Content-Length header"
                     ) from error
                 if content_length > max_bytes:
-                    raise VulnerabilityLookupError("OSV response exceeded the size limit")
+                    raise VulnerabilityLookupError(
+                        f"{provider} response exceeded the size limit"
+                    )
             body = response.read(max_bytes + 1)
     except HTTPError as error:
-        raise VulnerabilityLookupError(f"OSV returned HTTP {error.code}") from error
+        raise VulnerabilityLookupError(f"{provider} returned HTTP {error.code}") from error
     except URLError as error:
-        raise VulnerabilityLookupError(f"OSV request failed: {error.reason}") from error
+        raise VulnerabilityLookupError(
+            f"{provider} request failed: {error.reason}"
+        ) from error
     except TimeoutError as error:
-        raise VulnerabilityLookupError("OSV request timed out") from error
+        raise VulnerabilityLookupError(f"{provider} request timed out") from error
 
     if len(body) > max_bytes:
-        raise VulnerabilityLookupError("OSV response exceeded the size limit")
+        raise VulnerabilityLookupError(f"{provider} response exceeded the size limit")
     return body
 
 

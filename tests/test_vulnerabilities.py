@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 from hexpath.vulnerabilities import (
     CpeIdentity,
@@ -155,7 +156,7 @@ class OsvClientTests(unittest.TestCase):
         result = check_package(self.package, client=client)
 
         self.assertEqual(result.status, VulnerabilityStatus.UNKNOWN)
-        self.assertIn("size limit", result.error)
+        self.assertEqual(result.error, "OSV response exceeded the size limit")
 
 
 class PackageVulnerabilityResultTests(unittest.TestCase):
@@ -235,6 +236,17 @@ class NvdClientTests(unittest.TestCase):
 
         self.assertEqual(result.status, VulnerabilityStatus.UNKNOWN)
         self.assertIn("pagination", result.error)
+
+    @patch("hexpath.vulnerabilities.urlopen")
+    def test_default_transport_errors_name_nvd(self, open_mock) -> None:
+        open_mock.side_effect = HTTPError(
+            "https://services.nvd.nist.gov/", 403, "Forbidden", {}, None
+        )
+
+        result = check_cpe(self.cpe, client=NvdClient())
+
+        self.assertEqual(result.status, VulnerabilityStatus.UNKNOWN)
+        self.assertEqual(result.error, "NVD returned HTTP 403")
 
 
 class ScanVulnerabilityTests(unittest.TestCase):

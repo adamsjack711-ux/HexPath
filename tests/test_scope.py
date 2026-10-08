@@ -51,6 +51,23 @@ class ScopeTests(unittest.TestCase):
         self.assertEqual(scope.name, "test lab")
         self.assertEqual(str(scope.networks[0]), "fd00:1234::/64")
 
+    def test_accepts_target_subnet_contained_by_scope(self) -> None:
+        scope = Scope.from_dict(
+            {"name": "test lab", "targets": ["2001:db8:1::/64"]}
+        )
+
+        network = scope.require_authorized_network("2001:db8:1::/80")
+
+        self.assertEqual(str(network), "2001:db8:1::/80")
+
+    def test_rejects_target_subnet_broader_than_scope(self) -> None:
+        scope = Scope.from_dict(
+            {"name": "test lab", "targets": ["2001:db8:1::/64"]}
+        )
+
+        with self.assertRaises(TargetOutsideScopeError):
+            scope.require_authorized_network("2001:db8::/32")
+
 
 if __name__ == "__main__":
     unittest.main()

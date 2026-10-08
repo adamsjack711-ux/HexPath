@@ -86,3 +86,20 @@ class Scope:
             )
 
         return address
+
+    def require_authorized_network(self, target: str) -> IPv6Network:
+        """Return an IPv6 target network if it is contained by the scope."""
+        try:
+            network = ip_network(target, strict=True)
+        except ValueError as error:
+            raise ScopeError(f"invalid target network {target!r}: {error}") from error
+
+        if not isinstance(network, IPv6Network):
+            raise ScopeError(f"IPv4 target {target!r} is not supported")
+
+        if not any(network.subnet_of(allowed) for allowed in self.networks):
+            raise TargetOutsideScopeError(
+                f"target {network} is outside authorized scope {self.name!r}"
+            )
+
+        return network

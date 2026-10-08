@@ -265,20 +265,21 @@ def build_attack_graph(
     *,
     entry_id: str = ENTRY_NODE_ID,
 ) -> AttackGraph:
-    """Build the first-stage attack graph from scan and CVE JSON documents."""
-    if not isinstance(scan_document, dict):
-        raise GraphError("scan document must be an object")
+    """Build an attack graph from one or more vantage-aware scan documents."""
+    if isinstance(scan_document, dict):
+        scan_documents = (scan_document,)
+    elif isinstance(scan_document, (list, tuple)) and scan_document:
+        scan_documents = tuple(scan_document)
+    else:
+        raise GraphError("at least one scan document object is required")
     if not isinstance(cve_document, dict):
         raise GraphError("CVE document must be an object")
-    raw_hosts = scan_document.get("hosts")
-    raw_services = scan_document.get("services")
     raw_vulnerabilities = cve_document.get("vulnerabilities")
     raw_matches = cve_document.get("matches")
-    if not isinstance(raw_hosts, list) or not isinstance(raw_services, list):
-        raise GraphError("scan document must contain host and service lists")
     if not isinstance(raw_vulnerabilities, list) or not isinstance(raw_matches, list):
         raise GraphError("CVE document must contain vulnerability and match lists")
 
+    entry_id = _required_text(entry_id, "entry_id")
     nodes: list[GraphNode] = [
         GraphNode(
             node_id=entry_id,
@@ -288,11 +289,98 @@ def build_attack_graph(
         )
     ]
     edges: list[GraphEdge] = []
-    host_ids: set[str] = set()
-    for raw_host in raw_hosts:
-        host = _required_object(raw_host, "host")
-        host_id = _document_id(host, "host")
-        host_ids.add(host_id)
+    hosts: dict[str, dict[str, Any]] = {}
+    services: dict[str, dict[str, Any]] = {}
+    service_hosts: dict[str, str] = {}
+    observations: dict[tuple[str, str], dict[str, Any]] = {}
+    declared_vantages: set[str] = set()
+
+    for document in scan_documents:
+        if not isinstance(document, dict):
+            raise GraphError("scan document must be an object")
+        raw_hosts = document.get("hosts")
+        raw_services = document.get("services")
+        if not isinstance(raw_hosts, list) or not isinstance(raw_services, list):
+            raise GraphError("scan document must contain host and service lists")
+
+        raw_vantage = _required_text(
+            document.get("vantage", ENTRY_NODE_ID),
+            "scan vantage",
+        )
+        vantage = entry_id if raw_vantage == ENTRY_NODE_ID else raw_vantage
+        if vantage != entry_id and not vantage.startswith("host:"):
+            raise GraphError(
+                "scan vantage must be entry:scanner or a host node identifier"
+            )
+        declared_vantages.add(vantage)
+
+        seen_hosts: set[str] = set()
+        for raw_host in raw_hosts:
+            host = _required_object(raw_host, "host")
+            host_id = _document_id(host, "host")
+            if host_id in seen_hosts:
+                raise GraphError(f"scan contains duplicate host {host_id!r}")
+            seen_hosts.add(host_id)
+            existing_host = hosts.get(host_id)
+            if existing_host is not None and existing_host.get("address") != host.get(
+                "address"
+            ):
+                raise GraphError(f"scan documents disagree about host {host_id!r}")
+            hosts.setdefault(host_id, host)
+
+        seen_services: set[str] = set()
+        for raw_service in raw_services:
+            service = _required_object(raw_service, "service")
+            service_id = _document_id(service, "service")
+            if service_id in seen_services:
+                raise GraphError(f"scan contains duplicate service {service_id!r}")
+            seen_services.add(service_id)
+            host_address = _required_text(service.get("host"), "service host")
+            host_id = f"host:{host_address}"
+            if service_id in service_hosts and service_hosts[service_id] != host_id:
+                raise GraphError(
+                    f"scan documents disagree about service {service_id!r}"
+                )
+            services.setdefault(service_id, service)
+            service_hosts.setdefault(service_id, host_id)
+
+            state = service.get("state")
+            evidence = _evidence_list(service.get("evidence", []))
+            if not evidence:
+                evidence = (
+                    Evidence(
+                        source="hexpath",
+                        summary=(
+                            f"Service {service_id} was included in the normalized scan"
+                        ),
+                        level=EvidenceLevel.INFERRED,
+                    ),
+                )
+            key = (vantage, service_id)
+            observation = observations.setdefault(
+                key,
+                {
+                    "weight": 1.0 if state == "open" else 3.0,
+                    "states": [],
+                    "evidence": [],
+                },
+            )
+            observation["weight"] = min(
+                observation["weight"],
+                1.0 if state == "open" else 3.0,
+            )
+            if state not in observation["states"]:
+                observation["states"].append(state)
+            for item in evidence:
+                if item not in observation["evidence"]:
+                    observation["evidence"].append(item)
+
+    host_ids = set(hosts)
+    for vantage in declared_vantages:
+        if vantage != entry_id and vantage not in host_ids:
+            raise GraphError(f"scan vantage refers to unknown host {vantage!r}")
+
+    for host_id, host in hosts.items():
         nodes.append(
             GraphNode(
                 node_id=host_id,
@@ -305,19 +393,10 @@ def build_attack_graph(
             )
         )
 
-    services: dict[str, dict[str, Any]] = {}
-    service_hosts: dict[str, str] = {}
-    for raw_service in raw_services:
-        service = _required_object(raw_service, "service")
-        service_id = _document_id(service, "service")
-        if service_id in services:
-            raise GraphError(f"scan contains duplicate service {service_id!r}")
-        host_address = _required_text(service.get("host"), "service host")
-        host_id = f"host:{host_address}"
+    for service_id, service in services.items():
+        host_id = service_hosts[service_id]
         if host_id not in host_ids:
             raise GraphError(f"service {service_id!r} refers to unknown host {host_id!r}")
-        services[service_id] = service
-        service_hosts[service_id] = host_id
         product = service.get("product") or service.get("name") or "unknown service"
         version = f" {service['version']}" if service.get("version") else ""
         nodes.append(
@@ -340,27 +419,18 @@ def build_attack_graph(
                 },
             )
         )
-        state = service.get("state")
-        reachability_weight = 1.0 if state == "open" else 3.0
-        evidence = _evidence_list(service.get("evidence", []))
-        if not evidence:
-            evidence = (
-                Evidence(
-                    source="hexpath",
-                    summary=f"Service {service_id} was included in the normalized scan",
-                    level=EvidenceLevel.INFERRED,
-                ),
-            )
+
+    for (vantage, service_id), observation in observations.items():
         edges.append(
             GraphEdge(
-                edge_id=f"edge:reachability:{service_id}",
-                source=entry_id,
+                edge_id=f"edge:reachability:{vantage}:{service_id}",
+                source=vantage,
                 target=service_id,
                 relationship="observed_reachability",
-                weight=reachability_weight,
-                description=f"The scan entry point reached {service_id}",
-                evidence=evidence,
-                metadata={"service_state": state},
+                weight=observation["weight"],
+                description=f"{vantage} reached {service_id}",
+                evidence=tuple(observation["evidence"]),
+                metadata={"service_states": observation["states"]},
             )
         )
 

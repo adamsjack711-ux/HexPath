@@ -18,6 +18,7 @@ from hexpath.vulnerabilities import (
     check_cpe,
     check_package,
     check_scan_document,
+    check_scan_documents,
 )
 
 
@@ -294,6 +295,59 @@ class ScanVulnerabilityTests(unittest.TestCase):
 
         self.assertTrue(result.completed)
         self.assertEqual(result.status, VulnerabilityStatus.CLEAN)
+
+    def test_multiple_scans_deduplicate_services_and_cpe_queries(self) -> None:
+        calls = []
+
+        def transport(request, _timeout, _limit):
+            calls.append(request.full_url)
+            return json.dumps(
+                {
+                    "totalResults": 1,
+                    "vulnerabilities": [{"cve": {"id": "CVE-2026-12345"}}],
+                }
+            ).encode()
+
+        shared_cpe = "cpe:/a:example:service:1.0"
+        scans = [
+            {
+                "services": [
+                    {
+                        "id": "service:[2001:db8::10]:tcp:22",
+                        "cpes": [],
+                    }
+                ]
+            },
+            {
+                "services": [
+                    {
+                        "id": "service:[2001:db8::10]:tcp:22",
+                        "cpes": [shared_cpe],
+                    },
+                    {
+                        "id": "service:[2001:db8::20]:tcp:443",
+                        "cpes": [shared_cpe],
+                    },
+                ]
+            },
+        ]
+
+        result = check_scan_documents(
+            scans,
+            client=NvdClient(transport=transport),
+        )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(result.service_count, 2)
+        self.assertEqual(result.unmatched_services, ())
+        self.assertEqual(len(result.checks), 1)
+        self.assertEqual(
+            {match.service_id for match in result.matches},
+            {
+                "service:[2001:db8::10]:tcp:22",
+                "service:[2001:db8::20]:tcp:443",
+            },
+        )
 
 
 if __name__ == "__main__":

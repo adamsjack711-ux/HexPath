@@ -23,6 +23,7 @@ from hexpath.scanner import (
     ScannerError,
     build_nmap_command,
     parse_nmap_xml,
+    require_authorized_vantage,
     run_nmap,
 )
 from hexpath.scope import Scope, ScopeError
@@ -34,7 +35,7 @@ from hexpath.vulnerabilities import (
     VulnerabilityError,
     check_cpe,
     check_package,
-    check_scan_document,
+    check_scan_documents,
 )
 
 
@@ -86,6 +87,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=300,
         help="maximum Nmap runtime in seconds",
     )
+    run_parser.add_argument(
+        "--vantage",
+        default=ENTRY_NODE_ID,
+        help="entry:scanner or the authorized host:<IPv6> running this scan",
+    )
     run_parser.add_argument("targets", nargs="+", help="authorized IPv6 addresses or CIDRs")
 
     cve_parser = subcommands.add_parser(
@@ -128,7 +134,8 @@ def build_parser() -> argparse.ArgumentParser:
     scan_cve_parser.add_argument(
         "--input",
         required=True,
-        help="scan JSON path, or - to read standard input",
+        action="append",
+        help="scan JSON path, or - for standard input; repeat for multiple vantages",
     )
     scan_cve_parser.add_argument(
         "--timeout",
@@ -146,7 +153,12 @@ def build_parser() -> argparse.ArgumentParser:
         "build",
         help="build a graph from normalized scan and CVE JSON",
     )
-    graph_build_parser.add_argument("--scan", required=True, help="scan JSON path")
+    graph_build_parser.add_argument(
+        "--scan",
+        required=True,
+        action="append",
+        help="scan JSON path; repeat for multiple vantages",
+    )
     graph_build_parser.add_argument("--cves", required=True, help="CVE JSON path")
     graph_build_parser.add_argument(
         "--entry-id",
@@ -195,6 +207,12 @@ def _read_json_document(path: str, document_name: str) -> object:
         raise ValueError(f"could not read {document_name} JSON: {error}") from error
 
 
+def _read_json_documents(paths: Sequence[str], document_name: str) -> list[object]:
+    if paths.count("-") > 1:
+        raise ValueError("standard input can be used only once")
+    return [_read_json_document(path, document_name) for path in paths]
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run HexPath and return a process exit code."""
     parser = build_parser()
@@ -213,9 +231,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "scan" and args.scan_command == "run":
             scope = Scope.from_json_file(args.scope)
+            vantage = require_authorized_vantage(scope, args.vantage)
             command = build_nmap_command(scope, args.targets, args.profile)
             xml_output = run_nmap(command, timeout_seconds=args.timeout)
-            result = parse_nmap_xml(xml_output, reference="live-nmap")
+            result = parse_nmap_xml(
+                xml_output,
+                reference="live-nmap",
+                vantage=vantage,
+            )
             print(result.to_json())
             return 0
         if args.command == "cve" and args.cve_command == "package":
@@ -243,11 +266,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0 if result.completed else 2
         if args.command == "cve" and args.cve_command == "scan":
             try:
-                document = _read_json_document(args.input, "scan")
+                documents = _read_json_documents(args.input, "scan")
             except ValueError as error:
                 raise VulnerabilityError(str(error)) from error
-            result = check_scan_document(
-                document,
+            result = check_scan_documents(
+                documents,
                 client=NvdClient(
                     timeout_seconds=args.timeout,
                     api_key=os.environ.get("NVD_API_KEY"),
@@ -256,10 +279,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(result.to_json())
             return 0 if result.completed else 2
         if args.command == "graph" and args.graph_command == "build":
-            scan_document = _read_json_document(args.scan, "scan")
+            scan_documents = _read_json_documents(args.scan, "scan")
             cve_document = _read_json_document(args.cves, "CVE")
             graph = build_attack_graph(
-                scan_document,
+                scan_documents,
                 cve_document,
                 entry_id=args.entry_id,
             )

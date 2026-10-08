@@ -432,33 +432,59 @@ def check_scan_document(
     *,
     client: NvdClient | None = None,
 ) -> ScanVulnerabilityResult:
-    """Check every unique CPE in a normalized HexPath scan document."""
-    if not isinstance(document, dict) or not isinstance(document.get("services"), list):
-        raise VulnerabilityError("scan document must contain a services list")
+    """Check every unique CPE in one normalized HexPath scan document."""
+    return check_scan_documents((document,), client=client)
+
+
+def check_scan_documents(
+    documents: Any,
+    *,
+    client: NvdClient | None = None,
+) -> ScanVulnerabilityResult:
+    """Check unique CPEs across one or more normalized HexPath scans."""
+    if not isinstance(documents, (list, tuple)) or not documents:
+        raise VulnerabilityError("at least one scan document is required")
 
     cpe_services: dict[CpeIdentity, list[str]] = {}
-    unmatched_services: list[str] = []
-    seen_service_ids: set[str] = set()
-    for service in document["services"]:
-        if not isinstance(service, dict):
-            raise VulnerabilityError("scan document contains an invalid service")
-        service_id = service.get("id")
-        raw_cpes = service.get("cpes")
-        if not isinstance(service_id, str) or not service_id.strip():
-            raise VulnerabilityError("scan service is missing its identifier")
-        if service_id in seen_service_ids:
-            raise VulnerabilityError(f"scan contains duplicate service {service_id!r}")
-        seen_service_ids.add(service_id)
-        if not isinstance(raw_cpes, list) or any(
-            not isinstance(item, str) for item in raw_cpes
+    service_cpes: dict[str, list[CpeIdentity]] = {}
+    for document in documents:
+        if not isinstance(document, dict) or not isinstance(
+            document.get("services"), list
         ):
-            raise VulnerabilityError(f"scan service {service_id!r} has invalid CPE data")
-        if not raw_cpes:
-            unmatched_services.append(service_id)
-            continue
-        for raw_cpe in raw_cpes:
-            identity = CpeIdentity(raw_cpe)
-            cpe_services.setdefault(identity, []).append(service_id)
+            raise VulnerabilityError("scan document must contain a services list")
+        seen_in_document: set[str] = set()
+        for service in document["services"]:
+            if not isinstance(service, dict):
+                raise VulnerabilityError("scan document contains an invalid service")
+            service_id = service.get("id")
+            raw_cpes = service.get("cpes")
+            if not isinstance(service_id, str) or not service_id.strip():
+                raise VulnerabilityError("scan service is missing its identifier")
+            if service_id in seen_in_document:
+                raise VulnerabilityError(
+                    f"scan contains duplicate service {service_id!r}"
+                )
+            seen_in_document.add(service_id)
+            if not isinstance(raw_cpes, list) or any(
+                not isinstance(item, str) for item in raw_cpes
+            ):
+                raise VulnerabilityError(
+                    f"scan service {service_id!r} has invalid CPE data"
+                )
+            identities = service_cpes.setdefault(service_id, [])
+            for raw_cpe in raw_cpes:
+                identity = CpeIdentity(raw_cpe)
+                if identity not in identities:
+                    identities.append(identity)
+
+    unmatched_services = [
+        service_id for service_id, identities in service_cpes.items() if not identities
+    ]
+    for service_id, identities in service_cpes.items():
+        for identity in identities:
+            linked_services = cpe_services.setdefault(identity, [])
+            if service_id not in linked_services:
+                linked_services.append(service_id)
 
     provider = client or NvdClient()
     checks = tuple(check_cpe(cpe, client=provider) for cpe in cpe_services)
@@ -497,7 +523,7 @@ def check_scan_document(
         checks=checks,
         vulnerabilities=tuple(vulnerabilities.values()),
         matches=tuple(matches.values()),
-        service_count=len(document["services"]),
+        service_count=len(service_cpes),
         unmatched_services=tuple(unmatched_services),
     )
 

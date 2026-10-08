@@ -21,7 +21,7 @@ from hexpath.models import (
     ServiceState,
     TransportProtocol,
 )
-from hexpath.scope import Scope
+from hexpath.scope import Scope, ScopeError
 
 
 class ScannerError(RuntimeError):
@@ -62,9 +62,16 @@ class NmapScanResult:
 
     hosts: tuple[Host, ...]
     services: tuple[Service, ...]
+    vantage: str = "entry:scanner"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.vantage, str) or not self.vantage.strip():
+            raise ScannerError("scan vantage must be a non-empty string")
+        object.__setattr__(self, "vantage", self.vantage.strip())
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "vantage": self.vantage,
             "hosts": [host.to_dict() for host in self.hosts],
             "services": [service.to_dict() for service in self.services],
         }
@@ -149,6 +156,7 @@ def parse_nmap_xml(
     xml_text: str,
     *,
     reference: str = "nmap-xml",
+    vantage: str = "entry:scanner",
 ) -> NmapScanResult:
     """Convert Nmap XML into evidence-backed HexPath records."""
     try:
@@ -200,7 +208,28 @@ def parse_nmap_xml(
             )
         )
 
-    return NmapScanResult(hosts=tuple(hosts), services=tuple(services))
+    return NmapScanResult(
+        hosts=tuple(hosts),
+        services=tuple(services),
+        vantage=vantage,
+    )
+
+
+def require_authorized_vantage(scope: Scope, vantage: str) -> str:
+    """Validate and normalize the node from which a scan is observed."""
+    if not isinstance(vantage, str) or not vantage.strip():
+        raise ScannerError("scan vantage must be a non-empty string")
+    value = vantage.strip()
+    if value == "entry:scanner":
+        return value
+    if not value.startswith("host:"):
+        raise ScannerError("scan vantage must be entry:scanner or host:<IPv6-address>")
+    raw_address = value.removeprefix("host:")
+    try:
+        address = scope.require_authorized(raw_address)
+    except ScopeError as error:
+        raise ScannerError(f"invalid scan vantage {value!r}: {error}") from error
+    return f"host:{address.compressed}"
 
 
 def _parse_start_time(raw_start: str | None) -> datetime:

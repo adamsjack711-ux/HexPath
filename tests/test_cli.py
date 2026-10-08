@@ -70,7 +70,10 @@ class ScanCliTests(unittest.TestCase):
             )
 
         self.assertEqual(exit_code, 0)
-        self.assertEqual(json.loads(output.getvalue()), {"hosts": [], "services": []})
+        self.assertEqual(
+            json.loads(output.getvalue()),
+            {"vantage": "entry:scanner", "hosts": [], "services": []},
+        )
 
     def test_plan_reports_out_of_scope_target(self) -> None:
         errors = StringIO()
@@ -179,7 +182,7 @@ class CveCliTests(unittest.TestCase):
         self.assertEqual(document["status"], "clean")
         self.assertEqual(document["cpe"], "cpe:2.3:a:openbsd:openssh:9.6:*:*:*:*:*:*:*")
 
-    @patch("hexpath.cli.check_scan_document")
+    @patch("hexpath.cli.check_scan_documents")
     def test_scan_check_reads_normalized_scan_json(self, check_mock) -> None:
         check_mock.return_value = ScanVulnerabilityResult(
             checks=(),
@@ -199,6 +202,37 @@ class CveCliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(json.loads(output.getvalue())["status"], "clean")
         check_mock.assert_called_once()
+        self.assertEqual(len(check_mock.call_args.args[0]), 1)
+
+    @patch("hexpath.cli.check_scan_documents")
+    def test_scan_check_accepts_multiple_vantage_files(self, check_mock) -> None:
+        check_mock.return_value = ScanVulnerabilityResult(
+            checks=(),
+            vulnerabilities=(),
+            matches=(),
+            service_count=0,
+        )
+        temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+        first_path = Path(temporary_directory.name) / "first.json"
+        second_path = Path(temporary_directory.name) / "second.json"
+        first_path.write_text('{"hosts": [], "services": []}', encoding="utf-8")
+        second_path.write_text('{"hosts": [], "services": []}', encoding="utf-8")
+
+        with redirect_stdout(StringIO()):
+            exit_code = main(
+                [
+                    "cve",
+                    "scan",
+                    "--input",
+                    str(first_path),
+                    "--input",
+                    str(second_path),
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(check_mock.call_args.args[0]), 2)
 
 
 class GraphCliTests(unittest.TestCase):

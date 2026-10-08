@@ -198,6 +198,91 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(json.loads(restored.to_json()), json.loads(graph.to_json()))
         self.assertEqual(path.total_weight, 4.5)
 
+    def test_builds_evidence_backed_two_host_pivot_path(self) -> None:
+        first_scan, cves = sample_documents()
+        first_scan["vantage"] = ENTRY_NODE_ID
+        observed = evidence("Observed from the first host").to_dict()
+        second_service_id = "service:[2001:db8::20]:tcp:443"
+        second_scan = {
+            "vantage": "host:2001:db8::10",
+            "hosts": [
+                {
+                    "id": "host:2001:db8::20",
+                    "address": "2001:db8::20",
+                    "hostnames": ["internal.lab"],
+                    "evidence": [observed],
+                }
+            ],
+            "services": [
+                {
+                    "id": second_service_id,
+                    "host": "2001:db8::20",
+                    "port": 443,
+                    "protocol": "tcp",
+                    "state": "open",
+                    "name": "https",
+                    "product": "Internal API",
+                    "version": "2.0",
+                    "cpes": ["cpe:/a:example:api:2.0"],
+                    "evidence": [observed],
+                }
+            ],
+        }
+        cves["vulnerabilities"].append(
+            {
+                "id": "CVE-2026-22222",
+                "description": "Example internal service issue.",
+                "cvss_score": 8.0,
+                "cvss_vector": None,
+                "references": [],
+            }
+        )
+        cves["matches"].append(
+            {
+                "service_id": second_service_id,
+                "cve_id": "CVE-2026-22222",
+                "confidence": "medium",
+                "reason": "Exact CPE candidate; patch status unknown.",
+                "evidence": [
+                    Evidence(
+                        source="nvd",
+                        summary="NVD CPE applicability match",
+                        level=EvidenceLevel.INFERRED,
+                        collected_at=COLLECTED_AT,
+                        reference=(
+                            "https://nvd.nist.gov/vuln/detail/CVE-2026-22222"
+                        ),
+                    ).to_dict()
+                ],
+            }
+        )
+
+        graph = build_attack_graph([first_scan, second_scan], cves)
+        path = graph.shortest_path(ENTRY_NODE_ID, "host:2001:db8::20")
+
+        self.assertIsNotNone(path)
+        self.assertEqual(
+            path.nodes,
+            (
+                ENTRY_NODE_ID,
+                "service:[2001:db8::10]:tcp:22",
+                "host:2001:db8::10",
+                second_service_id,
+                "host:2001:db8::20",
+            ),
+        )
+        self.assertEqual(path.total_weight, 10.0)
+        rendered = render_path_ascii(graph, path)
+        self.assertIn("CVE-2024-6387", rendered)
+        self.assertIn("CVE-2026-22222", rendered)
+
+    def test_rejects_unknown_host_scan_vantage(self) -> None:
+        scan, cves = sample_documents()
+        scan["vantage"] = "host:2001:db8::99"
+
+        with self.assertRaisesRegex(GraphError, "vantage refers to unknown host"):
+            build_attack_graph(scan, cves)
+
     def test_rejects_match_for_unknown_service(self) -> None:
         scan, cves = sample_documents()
         cves["matches"][0]["service_id"] = "service:[2001:db8::99]:tcp:22"

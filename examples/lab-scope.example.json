@@ -1,6 +1,7 @@
 {
-  "name": "Example IPv6 lab",
+  "name": "Example dual-stack lab",
   "targets": [
+    "192.0.2.0/24",
     "2001:db8:1::/64",
     "fd00:1234:5678::/64"
   ]

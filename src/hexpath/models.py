@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
-from ipaddress import IPv6Address, ip_address
+from ipaddress import IPv4Address, IPv6Address, ip_address
 import json
 import re
 from typing import Any
@@ -14,6 +14,7 @@ from uuid import uuid4
 
 _CVE_PATTERN = re.compile(r"^CVE-[0-9]{4}-[0-9]{4,}$")
 _CPE_PREFIXES = ("cpe:/", "cpe:2.3:")
+IPAddress = IPv4Address | IPv6Address
 
 
 class ModelError(ValueError):
@@ -71,13 +72,11 @@ def _require_aware_datetime(value: datetime, field_name: str) -> datetime:
     return value
 
 
-def _parse_ipv6(value: IPv6Address | str, field_name: str) -> IPv6Address:
+def _parse_ip(value: IPAddress | str, field_name: str) -> IPAddress:
     try:
         address = ip_address(value)
     except ValueError as error:
         raise ModelError(f"{field_name} must be a valid IP address") from error
-    if not isinstance(address, IPv6Address):
-        raise ModelError(f"{field_name} must be an IPv6 address")
     return address
 
 
@@ -142,14 +141,14 @@ class Evidence:
 
 @dataclass(frozen=True, slots=True)
 class Host:
-    """An IPv6 host identified during an assessment."""
+    """An IPv4 or IPv6 host identified during an assessment."""
 
-    address: IPv6Address | str
+    address: IPAddress | str
     hostnames: tuple[str, ...] = ()
     evidence: tuple[Evidence, ...] = ()
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "address", _parse_ipv6(self.address, "host address"))
+        object.__setattr__(self, "address", _parse_ip(self.address, "host address"))
         hostnames = tuple(_require_text(name, "hostname") for name in self.hostnames)
         object.__setattr__(self, "hostnames", hostnames)
         object.__setattr__(self, "evidence", tuple(self.evidence))
@@ -169,9 +168,9 @@ class Host:
 
 @dataclass(frozen=True, slots=True)
 class Service:
-    """A network service associated with an IPv6 host."""
+    """A network service associated with an IP host."""
 
-    host: IPv6Address | str
+    host: IPAddress | str
     port: int
     protocol: TransportProtocol
     state: ServiceState
@@ -182,7 +181,7 @@ class Service:
     evidence: tuple[Evidence, ...] = ()
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "host", _parse_ipv6(self.host, "service host"))
+        object.__setattr__(self, "host", _parse_ip(self.host, "service host"))
         if isinstance(self.port, bool) or not isinstance(self.port, int):
             raise ModelError("service port must be an integer")
         if not 1 <= self.port <= 65535:

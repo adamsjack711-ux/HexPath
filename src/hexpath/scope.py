@@ -1,9 +1,16 @@
-"""Authorized IPv6 target scope loading and validation."""
+"""Authorized IPv4 and IPv6 target scope loading and validation."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from ipaddress import IPv6Address, IPv6Network, ip_address, ip_network
+from ipaddress import (
+    IPv4Address,
+    IPv4Network,
+    IPv6Address,
+    IPv6Network,
+    ip_address,
+    ip_network,
+)
 import json
 from pathlib import Path
 from typing import Any
@@ -17,12 +24,16 @@ class TargetOutsideScopeError(ScopeError):
     """Raised when a requested target is not in the authorized scope."""
 
 
+IPAddress = IPv4Address | IPv6Address
+IPNetwork = IPv4Network | IPv6Network
+
+
 @dataclass(frozen=True, slots=True)
 class Scope:
-    """A named collection of explicitly authorized IPv6 networks."""
+    """A named collection of explicitly authorized IP networks."""
 
     name: str
-    networks: tuple[IPv6Network, ...]
+    networks: tuple[IPNetwork, ...]
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Scope:
@@ -35,7 +46,7 @@ class Scope:
         if not isinstance(targets, list) or not targets:
             raise ScopeError("scope 'targets' must be a non-empty list")
 
-        networks: list[IPv6Network] = []
+        networks: list[IPNetwork] = []
         for raw_target in targets:
             if not isinstance(raw_target, str):
                 raise ScopeError("every scope target must be a string")
@@ -44,9 +55,6 @@ class Scope:
                 network = ip_network(raw_target, strict=True)
             except ValueError as error:
                 raise ScopeError(f"invalid scope target {raw_target!r}: {error}") from error
-
-            if not isinstance(network, IPv6Network):
-                raise ScopeError(f"IPv4 target {raw_target!r} is not supported")
 
             networks.append(network)
 
@@ -70,34 +78,34 @@ class Scope:
 
         return cls.from_dict(data)
 
-    def require_authorized(self, target: str) -> IPv6Address:
+    def require_authorized(self, target: str) -> IPAddress:
         """Return a parsed target or raise if it is invalid or unauthorized."""
         try:
             address = ip_address(target)
         except ValueError as error:
             raise ScopeError(f"invalid IP address {target!r}") from error
 
-        if not isinstance(address, IPv6Address):
-            raise ScopeError(f"IPv4 target {target!r} is not supported")
-
-        if not any(address in network for network in self.networks):
+        if not any(
+            address.version == network.version and address in network
+            for network in self.networks
+        ):
             raise TargetOutsideScopeError(
                 f"target {address} is outside authorized scope {self.name!r}"
             )
 
         return address
 
-    def require_authorized_network(self, target: str) -> IPv6Network:
-        """Return an IPv6 target network if it is contained by the scope."""
+    def require_authorized_network(self, target: str) -> IPNetwork:
+        """Return an IP target network if it is contained by the scope."""
         try:
             network = ip_network(target, strict=True)
         except ValueError as error:
             raise ScopeError(f"invalid target network {target!r}: {error}") from error
 
-        if not isinstance(network, IPv6Network):
-            raise ScopeError(f"IPv4 target {target!r} is not supported")
-
-        if not any(network.subnet_of(allowed) for allowed in self.networks):
+        if not any(
+            network.version == allowed.version and network.subnet_of(allowed)
+            for allowed in self.networks
+        ):
             raise TargetOutsideScopeError(
                 f"target {network} is outside authorized scope {self.name!r}"
             )

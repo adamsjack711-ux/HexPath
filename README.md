@@ -1,14 +1,14 @@
 # HexPath
 
-An IPv6 penetration-testing tool for lab practice and authorized engagements.
+An IPv4 and IPv6 penetration-testing tool for lab practice and authorized engagements.
 
-HexPath is our school group project to connect IPv6 network discovery, service assessment, CVE enrichment, and attack-path analysis in one workflow. The goal is to turn a long list of findings into a clear, prioritized view of potential paths through a network, so reviewers can understand how findings relate and where to focus their assessment.
+HexPath is our school group project to connect IP network discovery, service assessment, CVE enrichment, and attack-path analysis in one workflow. The goal is to turn a long list of findings into a clear, prioritized view of potential paths through a network, so reviewers can understand how findings relate and where to focus their assessment.
 
 ## Project status
 
 HexPath currently provides:
 
-- IPv6-only scope validation.
+- Dual-stack IPv4 and IPv6 scope validation.
 - Scope-checked Nmap discovery and service scans.
 - Normalized host, service, CPE, evidence, and vulnerability records.
 - NVD CVE lookup for CPEs reported by Nmap.
@@ -22,7 +22,7 @@ HexPath currently provides:
 
 ## Workflow
 
-1. **IPv6 discovery** — Identify live IPv6 hosts within the approved assessment scope.
+1. **IP discovery** — Identify live IPv4 or IPv6 hosts within the approved assessment scope.
 2. **Service assessment** — Use Nmap to identify exposed services and their reported versions.
 3. **CVE enrichment** — Add relevant known-vulnerability candidates from NVD and OSV with explicit evidence and coverage status.
 4. **Network modeling** — Represent hosts and potential transitions as a weighted, directed graph.
@@ -41,10 +41,11 @@ python3 -m venv .venv
 
 ## Quick command-line use
 
-HexPath runs entirely in the terminal. Create the authorized IPv6 scope once:
+HexPath runs entirely in the terminal. Create the authorized scope once. A scope
+can contain IPv4 networks, IPv6 networks, or both:
 
 ```sh
-hexpath scope init 2001:db8:1::/64
+hexpath scope init 192.0.2.0/24 2001:db8:1::/64
 ```
 
 For a one-off assessment, provide the authorized network directly and skip the
@@ -52,6 +53,7 @@ scope file:
 
 ```sh
 hexpath --scope 2001:db8:1::/64 2001:db8:1::10
+hexpath --scope 192.0.2.0/24 192.0.2.10
 ```
 
 Then assess a target with one command:
@@ -63,7 +65,7 @@ hexpath 2001:db8:1::10
 That command automatically:
 
 1. Validates the target against `scope.json`.
-2. Runs Nmap IPv6 service and version detection.
+2. Runs Nmap service and version detection for the target's address family.
 3. Checks discovered CPEs against NVD.
 4. Builds the directed attack graph.
 5. Prints the complete host, service, and CVE topology as ASCII in the terminal.
@@ -72,7 +74,12 @@ Familiar Nmap-style flags are also accepted:
 
 ```sh
 hexpath -6 -sV -Pn -p 22,443 2001:db8:1::10
+hexpath -4 -sV -Pn -p 22,443 192.0.2.10
 ```
+
+The `-4` and `-6` flags are optional checks; HexPath normally infers the address
+family from the targets. One scan command cannot mix IPv4 and IPv6 targets, so
+run one command per family when a scope contains both.
 
 Use `-Pn` when ICMP or another firewall rule prevents Nmap host discovery even
 though the target is reachable.
@@ -197,9 +204,11 @@ hexpath scan run \
 ```
 
 Use a host vantage only for a scan performed from that host. HexPath validates
-that the vantage address is inside the authorized IPv6 scope.
+that the vantage address is inside the authorized scope.
 
-Every target must be fully contained within an allowed IPv6 network. HexPath rejects broader networks and IPv4 targets before starting Nmap.
+Every target must be fully contained within an allowed network of the same
+address family. HexPath rejects broader and out-of-scope networks before
+starting Nmap. A single Nmap command cannot combine IPv4 and IPv6 targets.
 
 ### CVE checking
 
@@ -265,7 +274,7 @@ The list includes hosts without a modeled path. Its reachability status describe
 the evidence-backed attack graph, rather than whether a host responds to network
 traffic. Use `--source` to list reachability from a different entry or host.
 
-Compare several routes to the same host, using an IPv6 address or an exact node ID:
+Compare several routes to the same host, using an IP address or an exact node ID:
 
 ```sh
 hexpath graph paths --graph graph.json --target 2001:db8:1::10 --limit 3
@@ -283,7 +292,8 @@ an added `rank` and `cost_delta`.
 has no directed path, and `2` for invalid input or an unknown target. A comparison
 without a route returns an empty JSON `paths` list. The direct assessment uses
 these same exit codes when `--target` is supplied. `graph path` keeps its original
-single-route JSON format. These commands also accept an IPv6 address for `--source`.
+single-route JSON format. These commands also accept an IPv4 or IPv6 address
+for `--source`.
 
 The terminal output uses ASCII branches and arrows. Pass `--json` to `graph build` or `graph path` when another program needs machine-readable output.
 

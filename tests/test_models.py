@@ -92,9 +92,17 @@ class EvidenceTests(unittest.TestCase):
 
 
 class HostAndServiceTests(unittest.TestCase):
-    def test_host_rejects_ipv4(self) -> None:
-        with self.assertRaisesRegex(ModelError, "IPv6"):
-            Host(address="192.0.2.10")
+    def test_host_and_service_accept_ipv4(self) -> None:
+        host = Host(address="192.0.2.10")
+        service = Service(
+            host=host.address,
+            port=443,
+            protocol=TransportProtocol.TCP,
+            state=ServiceState.OPEN,
+        )
+
+        self.assertEqual(host.record_id, "host:192.0.2.10")
+        self.assertEqual(service.record_id, "service:[192.0.2.10]:tcp:443")
 
     def test_service_has_stable_record_id(self) -> None:
         _, service, _, _ = sample_records()

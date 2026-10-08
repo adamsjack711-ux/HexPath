@@ -26,6 +26,19 @@ comparison milestone. Its implementation and tests touch:
 Avoid duplicating this milestone in a concurrent task. If changing its code,
 describe the additional behavior and coordinate any edits to the same functions.
 
+`feat/ipv4-support` adds IPv4 scope validation, scanning, normalized records,
+graph selection, CLI coverage, and documentation. It builds on
+`feat/target-path-comparison` and touches:
+
+- `src/hexpath/scope.py`
+- `src/hexpath/scanner.py`
+- `src/hexpath/models.py`
+- `src/hexpath/cli.py`
+- `src/hexpath/graph.py`
+- their corresponding tests, `README.md`, and the example scope
+
+Avoid parallel IPv4 or address-family changes until this branch is merged.
+
 ## Review and verification
 
 Commit only the files belonging to your task. Open a separate pull request for

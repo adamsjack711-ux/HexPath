@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
-from ipaddress import IPv6Address, ip_address
+from ipaddress import IPv4Address, IPv6Address, ip_address
 import json
 import re
 import shutil
@@ -23,6 +23,9 @@ from hexpath.models import (
     TransportProtocol,
 )
 from hexpath.scope import Scope, ScopeError
+
+
+IPAddress = IPv4Address | IPv6Address
 
 
 class ScannerError(RuntimeError):
@@ -55,6 +58,7 @@ class NmapCommand:
     arguments: tuple[str, ...]
     targets: tuple[str, ...]
     profile: ScanProfile
+    ip_version: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +93,7 @@ def build_nmap_command(
     executable: str = "nmap",
     skip_discovery: bool = False,
     ports: str | None = None,
+    ip_version: int | None = None,
 ) -> NmapCommand:
     """Validate targets against scope and construct a conservative command."""
     if not targets:
@@ -99,13 +104,27 @@ def build_nmap_command(
     except ValueError as error:
         raise ScannerError(f"unsupported scan profile: {profile!r}") from error
 
-    authorized_targets = tuple(
-        str(scope.require_authorized_network(target)) for target in targets
+    authorized_networks = tuple(
+        scope.require_authorized_network(target) for target in targets
     )
+    versions = {network.version for network in authorized_networks}
+    if len(versions) != 1:
+        raise ScannerError(
+            "one Nmap command cannot mix IPv4 and IPv6 targets; run one scan per family"
+        )
+    selected_version = versions.pop()
+    if ip_version is not None and ip_version not in (4, 6):
+        raise ScannerError("ip_version must be 4, 6, or null")
+    if ip_version is not None and ip_version != selected_version:
+        raise ScannerError(
+            f"IPv{selected_version} targets do not match the requested IPv{ip_version} mode"
+        )
+    authorized_targets = tuple(str(network) for network in authorized_networks)
 
+    family_arguments = ("-6",) if selected_version == 6 else ()
     common_arguments = (
         executable,
-        "-6",
+        *family_arguments,
         "-n",
         "--reason",
         "-oX",
@@ -130,6 +149,7 @@ def build_nmap_command(
         ),
         targets=authorized_targets,
         profile=selected_profile,
+        ip_version=selected_version,
     )
 
 
@@ -206,7 +226,7 @@ def parse_nmap_xml(
         if status_element is None or status_element.attrib.get("state") != "up":
             continue
 
-        address = _find_ipv6_address(host_element)
+        address = _find_ip_address(host_element)
         if address is None:
             continue
 
@@ -253,7 +273,7 @@ def require_authorized_vantage(scope: Scope, vantage: str) -> str:
     if value == "entry:scanner":
         return value
     if not value.startswith("host:"):
-        raise ScannerError("scan vantage must be entry:scanner or host:<IPv6-address>")
+        raise ScannerError("scan vantage must be entry:scanner or host:<IP-address>")
     raw_address = value.removeprefix("host:")
     try:
         address = scope.require_authorized(raw_address)
@@ -271,26 +291,35 @@ def _parse_start_time(raw_start: str | None) -> datetime:
         raise NmapParseError(f"invalid Nmap start timestamp: {raw_start!r}") from error
 
 
-def _find_ipv6_address(host_element: ElementTree.Element) -> IPv6Address | None:
+def _find_ip_address(host_element: ElementTree.Element) -> IPAddress | None:
     for address_element in host_element.findall("address"):
-        if address_element.attrib.get("addrtype") != "ipv6":
+        address_type = address_element.attrib.get("addrtype")
+        if address_type not in {"ipv4", "ipv6"}:
             continue
         raw_address = address_element.attrib.get("addr")
         if raw_address is None:
-            raise NmapParseError("IPv6 address element is missing its address")
+            raise NmapParseError(
+                f"{address_type.upper()} address element is missing its address"
+            )
         try:
             address = ip_address(raw_address)
         except ValueError as error:
-            raise NmapParseError(f"invalid IPv6 address in Nmap XML: {raw_address}") from error
-        if not isinstance(address, IPv6Address):
-            raise NmapParseError(f"address marked IPv6 is not IPv6: {raw_address}")
+            raise NmapParseError(
+                f"invalid {address_type.upper()} address in Nmap XML: {raw_address}"
+            ) from error
+        expected_type = IPv4Address if address_type == "ipv4" else IPv6Address
+        if not isinstance(address, expected_type):
+            raise NmapParseError(
+                f"address marked {address_type.upper()} is not {address_type.upper()}: "
+                f"{raw_address}"
+            )
         return address
     return None
 
 
 def _parse_services(
     host_element: ElementTree.Element,
-    address: IPv6Address,
+    address: IPAddress,
     *,
     collected_at: datetime,
     reference: str,

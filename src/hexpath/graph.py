@@ -14,6 +14,7 @@ from hexpath.models import Confidence, Evidence, EvidenceLevel
 
 
 ENTRY_NODE_ID = "entry:scanner"
+DEFAULT_RENDER_MAX_DEPTH = 100
 
 
 class GraphError(ValueError):
@@ -500,8 +501,20 @@ def build_attack_graph(
     return AttackGraph(nodes=tuple(nodes), edges=tuple(edges))
 
 
-def render_attack_graph_ascii(graph: AttackGraph) -> str:
-    """Render a directed graph as a branching ASCII diagram."""
+def render_attack_graph_ascii(
+    graph: AttackGraph,
+    *,
+    max_depth: int = DEFAULT_RENDER_MAX_DEPTH,
+) -> str:
+    """Render a directed graph as a branching ASCII diagram.
+
+    Branches deeper than ``max_depth`` levels are not indented further; the
+    node where the limit was reached is drawn again as a separate tree below,
+    so every node and edge is still shown and output stays proportional to
+    the graph's size.
+    """
+    if isinstance(max_depth, bool) or not isinstance(max_depth, int) or max_depth < 1:
+        raise GraphError("max_depth must be a positive integer")
     nodes = {node.node_id: node for node in graph.nodes}
     adjacency: dict[str, list[GraphEdge]] = {node_id: [] for node_id in nodes}
     incoming = {node_id: 0 for node_id in nodes}
@@ -516,23 +529,41 @@ def render_attack_graph_ascii(graph: AttackGraph) -> str:
     lines = ["HexPath Attack Graph", "===================="]
     expanded: set[str] = set()
 
-    def walk(node_id: str, prefix: str, ancestry: frozenset[str]) -> None:
-        expanded.add(node_id)
-        outgoing = adjacency[node_id]
-        for index, edge in enumerate(outgoing):
+    def walk(root: str) -> None:
+        # Depth-first walk with an explicit stack instead of recursion, so very
+        # long paths cannot exceed Python's recursion limit. Each frame holds a
+        # node, its line prefix, and the index of its next outgoing edge. The
+        # nodes on the stack are exactly the current branch, which is what
+        # cycle detection needs.
+        expanded.add(root)
+        stack: list[tuple[str, str, int]] = [(root, "", 0)]
+        on_branch: set[str] = {root}
+        while stack:
+            node_id, prefix, index = stack[-1]
+            outgoing = adjacency[node_id]
+            if index >= len(outgoing):
+                stack.pop()
+                on_branch.discard(node_id)
+                continue
+            stack[-1] = (node_id, prefix, index + 1)
+            edge = outgoing[index]
             is_last = index == len(outgoing) - 1
             child_prefix = prefix + ("    " if is_last else "|   ")
             target_text = _ascii_node(nodes[edge.target])
             marker = ""
-            if edge.target in ancestry:
+            if edge.target in on_branch:
                 marker = " (cycle)"
             elif edge.target in expanded:
                 marker = " (reference)"
+            elif len(stack) >= max_depth:
+                marker = " (continued below: depth limit reached)"
             lines.append(
                 f"{prefix}+-- {_ascii_edge(edge)} --> {target_text}{marker}"
             )
             if not marker:
-                walk(edge.target, child_prefix, ancestry | {edge.target})
+                expanded.add(edge.target)
+                on_branch.add(edge.target)
+                stack.append((edge.target, child_prefix, 0))
 
     for root in roots:
         if root in expanded:
@@ -540,7 +571,7 @@ def render_attack_graph_ascii(graph: AttackGraph) -> str:
         if len(lines) > 2:
             lines.append("")
         lines.append(_ascii_node(nodes[root]))
-        walk(root, "", frozenset({root}))
+        walk(root)
 
     for node_id in sorted(nodes):
         if node_id in expanded:
@@ -548,7 +579,7 @@ def render_attack_graph_ascii(graph: AttackGraph) -> str:
         if len(lines) > 2:
             lines.append("")
         lines.append(_ascii_node(nodes[node_id]))
-        walk(node_id, "", frozenset({node_id}))
+        walk(node_id)
 
     lines.append("")
     lines.append(f"Nodes: {len(graph.nodes)}  Edges: {len(graph.edges)}")

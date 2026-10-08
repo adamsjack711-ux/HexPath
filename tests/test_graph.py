@@ -339,5 +339,83 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("bad?[31m?label", rendered)
 
 
+def chain_graph(length: int, *, loop_back: bool = False) -> AttackGraph:
+    """An entry node followed by ``length`` hosts in a single line."""
+    nodes = [GraphNode(ENTRY_NODE_ID, NodeKind.ENTRY, "entry")]
+    nodes += [GraphNode(f"host:{index}", NodeKind.HOST, "host") for index in range(length)]
+    edges = [
+        GraphEdge(
+            edge_id=f"edge:{index}",
+            source=ENTRY_NODE_ID if index == 0 else f"host:{index - 1}",
+            target=f"host:{index}",
+            relationship="transition",
+            weight=1,
+            description="step",
+            evidence=(evidence(),),
+        )
+        for index in range(length)
+    ]
+    if loop_back:
+        edges.append(
+            GraphEdge(
+                edge_id="edge:back",
+                source=f"host:{length - 1}",
+                target="host:0",
+                relationship="transition",
+                weight=1,
+                description="loop",
+                evidence=(evidence(),),
+            )
+        )
+    return AttackGraph(nodes=tuple(nodes), edges=tuple(edges))
+
+
+class DeepGraphRenderingTests(unittest.TestCase):
+    def test_renders_graph_deeper_than_python_recursion_limit(self) -> None:
+        graph = chain_graph(5000)
+
+        rendered = render_attack_graph_ascii(graph)
+
+        self.assertTrue(rendered.endswith("Nodes: 5001  Edges: 5000"))
+        for index in (0, 2500, 4999):
+            self.assertIn(f"<host:{index}>", rendered)
+
+    def test_output_stays_proportional_to_graph_size(self) -> None:
+        rendered = render_attack_graph_ascii(chain_graph(5000))
+
+        longest_line = max(len(line) for line in rendered.splitlines())
+        self.assertLess(longest_line, 4 * 100 + 200)
+        self.assertLess(len(rendered), 5000 * 600)
+
+    def test_depth_limit_continues_branch_as_separate_tree(self) -> None:
+        rendered = render_attack_graph_ascii(chain_graph(3), max_depth=2)
+
+        self.assertEqual(
+            rendered.splitlines(),
+            [
+                "HexPath Attack Graph",
+                "====================",
+                "[ENTRY] entry <entry:scanner>",
+                "+-- [transition, cost=1.00] --> [HOST] host <host:0>",
+                "    +-- [transition, cost=1.00] --> [HOST] host <host:1>"
+                " (continued below: depth limit reached)",
+                "",
+                "[HOST] host <host:1>",
+                "+-- [transition, cost=1.00] --> [HOST] host <host:2>",
+                "",
+                "Nodes: 4  Edges: 3",
+            ],
+        )
+
+    def test_cycle_is_still_detected_at_depth(self) -> None:
+        rendered = render_attack_graph_ascii(chain_graph(50, loop_back=True))
+
+        self.assertIn("--> [HOST] host <host:0> (cycle)", rendered)
+
+    def test_rejects_invalid_max_depth(self) -> None:
+        with self.assertRaisesRegex(GraphError, "max_depth"):
+            render_attack_graph_ascii(chain_graph(1), max_depth=0)
+
+
 if __name__ == "__main__":
     unittest.main()

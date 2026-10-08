@@ -14,6 +14,7 @@ HexPath currently provides:
 - NVD CVE lookup for CPEs reported by Nmap.
 - OSV package-version lookup based on the checking rules used by pkgxray.
 - Explicit coverage reporting that distinguishes a clean result from a failed or incomplete lookup.
+- Directed attack-graph construction, ASCII terminal rendering, and Dijkstra path analysis.
 
 ## Workflow
 
@@ -80,6 +81,35 @@ Set `NVD_API_KEY` in the environment when an NVD API key is available. HexPath s
 
 CPE findings are candidate matches. Nmap identifies the product and version remotely, and NVD identifies applicable CVEs, but a vendor may have backported a patch without changing the reported version. HexPath therefore records these links as inferred, medium-confidence evidence until patch status is validated.
 
+## Attack graph
+
+Build a reusable graph file and display its ASCII representation:
+
+```sh
+hexpath graph build \
+  --scan scan.json \
+  --cves cve-results.json \
+  --output graph.json
+```
+
+Display a saved graph again:
+
+```sh
+hexpath graph show --graph graph.json
+```
+
+Find and display the lowest-cost directed path to a selected host:
+
+```sh
+hexpath graph path \
+  --graph graph.json \
+  --target host:2001:db8:1::10
+```
+
+The terminal output uses ASCII branches and arrows. Pass `--json` to `graph build` or `graph path` when another program needs machine-readable output.
+
+Candidate exploit costs use `11 - CVSS score`, plus a confidence penalty of `0` for high, `1.5` for medium, or `3` for low confidence. A missing CVSS score uses the neutral value `5.0`. Lower costs are prioritized by Dijkstra's algorithm. These costs rank investigation paths; they are not exploit probabilities.
+
 ## Tests
 
 ```sh
@@ -95,4 +125,4 @@ python -m unittest discover --start-directory tests --verbose
 
 ## Next milestone
 
-Build the weighted attack graph from the normalized hosts, services, CVEs, confidence levels, and supporting evidence.
+Add explicit reachability evidence from additional scan vantage points so graphs can represent and compare longer multi-host pivot paths.

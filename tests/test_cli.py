@@ -383,6 +383,55 @@ class GraphCliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(document["nodes"], ["entry:kali", "host:target"])
 
+    def test_astar_path_supports_custom_source_json_and_ascii(self) -> None:
+        graph_path = self._write_entry_graph(["entry:kali", "entry:vpn"])
+        for output_flags in (["--json"], []):
+            with self.subTest(output_flags=output_flags):
+                output = StringIO()
+                with redirect_stdout(output):
+                    exit_code = main([
+                        "graph", "path", "--graph", str(graph_path),
+                        "--source", "entry:vpn", "--target", "host:target",
+                        "--algorithm", "astar", *output_flags,
+                    ])
+                self.assertEqual(exit_code, 0)
+                if output_flags:
+                    document = json.loads(output.getvalue())
+                    self.assertEqual(document["nodes"], ["entry:vpn", "host:target"])
+                    self.assertEqual(document["total_weight"], 2.5)
+                else:
+                    self.assertIn("Total cost: 2.50", output.getvalue())
+
+    def test_astar_defaults_to_entry_and_preserves_unreachable_exit_status(self) -> None:
+        graph_path = self._write_entry_graph(["entry:kali"])
+        for source_flags, target, expected_status in (
+            ([], "host:target", 0),
+            (["--source", "host:target"], "entry:kali", 1),
+        ):
+            with self.subTest(target=target):
+                output = StringIO()
+                with redirect_stdout(output):
+                    exit_code = main([
+                        "graph", "path", "--graph", str(graph_path),
+                        *source_flags, "--target", target,
+                        "--algorithm", "astar", "--json",
+                    ])
+                self.assertEqual(exit_code, expected_status)
+                document = json.loads(output.getvalue())
+                if expected_status == 0:
+                    self.assertEqual(document["nodes"], ["entry:kali", "host:target"])
+                else:
+                    self.assertIsNone(document["path"])
+
+    def test_path_rejects_unknown_algorithm(self) -> None:
+        graph_path = self._write_entry_graph(["entry:kali"])
+        with redirect_stderr(StringIO()), self.assertRaises(SystemExit) as raised:
+            main([
+                "graph", "path", "--graph", str(graph_path),
+                "--target", "host:target", "--algorithm", "greedy",
+            ])
+        self.assertEqual(raised.exception.code, 2)
+
     def test_path_requires_source_when_graph_has_several_entries(self) -> None:
         graph_path = self._write_entry_graph(["entry:kali", "entry:vpn"])
         errors = StringIO()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -114,7 +115,7 @@ class GraphEdge:
 
 @dataclass(frozen=True, slots=True)
 class ShortestPath:
-    """The lowest-cost directed path returned by Dijkstra's algorithm."""
+    """The lowest-cost directed path returned by a pathfinding algorithm."""
 
     nodes: tuple[str, ...]
     edges: tuple[GraphEdge, ...]
@@ -169,8 +170,12 @@ class AttackGraph:
             + ", ".join(sorted(entries))
         )
 
-    def shortest_path(self, source: str, target: str) -> ShortestPath | None:
-        """Return the minimum-cost directed path using Dijkstra's algorithm."""
+    def shortest_path(
+        self, source: str, target: str, *, algorithm: str = "dijkstra"
+    ) -> ShortestPath | None:
+        """Return a minimum-cost path using Dijkstra (default) or A*."""
+        if algorithm not in ("dijkstra", "astar"):
+            raise GraphError(f"unknown path algorithm {algorithm!r}; use dijkstra or astar")
         node_ids = {node.node_id for node in self.nodes}
         if source not in node_ids:
             raise GraphError(f"unknown source node {source!r}")
@@ -178,6 +183,8 @@ class AttackGraph:
             raise GraphError(f"unknown target node {target!r}")
         if source == target:
             return ShortestPath(nodes=(source,), edges=(), total_weight=0.0)
+        if algorithm == "astar":
+            return self._astar_path(source, target)
 
         adjacency: dict[str, list[GraphEdge]] = {node_id: [] for node_id in node_ids}
         for edge in self.edges:
@@ -202,19 +209,59 @@ class AttackGraph:
         if target not in distances:
             return None
 
-        path_edges: list[GraphEdge] = []
-        current = target
-        while current != source:
-            edge = previous[current]
-            path_edges.append(edge)
-            current = edge.source
-        path_edges.reverse()
-        path_nodes = (source, *(edge.target for edge in path_edges))
-        return ShortestPath(
-            nodes=path_nodes,
-            edges=tuple(path_edges),
-            total_weight=round(distances[target], 4),
-        )
+        return _reconstruct_path(source, target, previous, distances[target])
+
+    def _astar_path(self, source: str, target: str) -> ShortestPath | None:
+        """Search with h(node) = minimum hops to target * minimum edge cost.
+
+        Reverse BFS computes hop counts without using weights. Every remaining
+        path has at least that many edges, each costing at least the minimum
+        weight, so h is an admissible and consistent lower bound. Nodes absent
+        from the reverse traversal cannot reach the target and are skipped.
+        """
+        adjacency: dict[str, list[GraphEdge]] = {
+            node.node_id: [] for node in self.nodes
+        }
+        incoming: dict[str, list[str]] = {node_id: [] for node_id in adjacency}
+        minimum_weight = math.inf
+        for edge in self.edges:
+            adjacency[edge.source].append(edge)
+            incoming[edge.target].append(edge.source)
+            minimum_weight = min(minimum_weight, edge.weight)
+
+        hops = {target: 0}
+        pending = deque([target])
+        while pending:
+            node_id = pending.popleft()
+            for predecessor in incoming[node_id]:
+                if predecessor not in hops:
+                    hops[predecessor] = hops[node_id] + 1
+                    pending.append(predecessor)
+        if source not in hops:
+            return None
+
+        distances = {source: 0.0}
+        previous: dict[str, GraphEdge] = {}
+        # Keep g separately from f so outdated queue entries can be discarded.
+        queue: list[tuple[float, float, str]] = [
+            (hops[source] * minimum_weight, 0.0, source)
+        ]
+        while queue:
+            _, distance, node_id = heapq.heappop(queue)
+            if distance != distances.get(node_id):
+                continue
+            if node_id == target:
+                return _reconstruct_path(source, target, previous, distance)
+            for edge in adjacency[node_id]:
+                if edge.target not in hops:
+                    continue
+                candidate = distance + edge.weight
+                if candidate < distances.get(edge.target, math.inf):
+                    distances[edge.target] = candidate
+                    previous[edge.target] = edge
+                    estimate = candidate + hops[edge.target] * minimum_weight
+                    heapq.heappush(queue, (estimate, candidate, edge.target))
+        return None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -246,11 +293,31 @@ class AttackGraph:
         return cls.from_dict(document)
 
 
+def _reconstruct_path(
+    source: str,
+    target: str,
+    previous: dict[str, GraphEdge],
+    distance: float,
+) -> ShortestPath:
+    path_edges: list[GraphEdge] = []
+    current = target
+    while current != source:
+        edge = previous[current]
+        path_edges.append(edge)
+        current = edge.source
+    path_edges.reverse()
+    return ShortestPath(
+        nodes=(source, *(edge.target for edge in path_edges)),
+        edges=tuple(path_edges),
+        total_weight=round(distance, 4),
+    )
+
+
 def vulnerability_cost(
     cvss_score: float | None,
     confidence: Confidence | str,
 ) -> float:
-    """Convert severity and confidence into a positive Dijkstra edge cost."""
+    """Convert severity and confidence into a positive path edge cost."""
     try:
         confidence_value = Confidence(confidence)
     except (TypeError, ValueError) as error:

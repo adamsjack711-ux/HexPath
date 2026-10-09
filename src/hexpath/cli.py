@@ -181,7 +181,7 @@ def build_parser() -> argparse.ArgumentParser:
     graph_show_parser.add_argument("--graph", required=True, help="graph JSON path")
     graph_path_parser = graph_commands.add_parser(
         "path",
-        help="find the lowest-cost directed path with Dijkstra's algorithm",
+        help="find the lowest-cost directed path with Dijkstra or A*",
     )
     graph_path_parser.add_argument("--graph", required=True, help="graph JSON path")
     graph_path_parser.add_argument(
@@ -189,6 +189,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="source node identifier (default: the graph's entry node)",
     )
     graph_path_parser.add_argument("--target", required=True, help="target node identifier")
+    graph_path_parser.add_argument(
+        "--algorithm",
+        choices=("dijkstra", "astar"),
+        default="dijkstra",
+        help="pathfinding algorithm (default: dijkstra)",
+    )
     graph_path_parser.add_argument(
         "--json",
         action="store_true",
@@ -299,7 +305,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "graph" and args.graph_command == "path":
             graph = AttackGraph.from_dict(_read_json_document(args.graph, "graph"))
             source = args.source or graph.default_source()
-            path = graph.shortest_path(source, args.target)
+            path = graph.shortest_path(source, args.target, algorithm=args.algorithm)
             if path is None:
                 if args.json:
                     print(

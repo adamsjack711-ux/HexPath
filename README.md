@@ -15,7 +15,7 @@ HexPath currently provides:
 - OSV package-version lookup based on the checking rules used by pkgxray.
 - Explicit coverage reporting that distinguishes a clean result from a failed or incomplete lookup.
 - Vantage-aware multi-host reachability modeling.
-- Directed attack-graph construction, ASCII terminal rendering, and Dijkstra path analysis.
+- Directed attack-graph construction, ASCII terminal rendering, and Dijkstra or A* path analysis.
 
 ## Workflow
 
@@ -23,7 +23,7 @@ HexPath currently provides:
 2. **Service assessment** — Use Nmap to identify exposed services and their reported versions.
 3. **CVE enrichment** — Add relevant known-vulnerability candidates from NVD and OSV with explicit evidence and coverage status.
 4. **Network modeling** — Represent hosts and potential transitions as a weighted, directed graph.
-5. **Path analysis** — Use Dijkstra’s algorithm to identify the lowest-cost modeled path between a selected entry point and target, showing the associated findings along the path.
+5. **Path analysis** — Use Dijkstra’s algorithm (default) or A* to identify the lowest-cost modeled path between a selected entry point and target, showing the associated findings along the path.
 
 Strict scope controls are applied before a scan command is constructed. HexPath is intended for lab environments and networks the assessment team is authorized to test.
 
@@ -144,6 +144,46 @@ hexpath graph path \
   --target host:2001:db8:1::10
 ```
 
+Try the same saved graph with A* by adding `--algorithm astar`:
+
+```sh
+hexpath graph path \
+  --graph graph.json \
+  --target host:2001:db8:1::10 \
+  --algorithm astar
+```
+
+Both algorithms return the same minimum cost and preserve the path's evidence
+and output format. Equally cheap routes can produce different node sequences.
+Dijkstra remains the default; select it explicitly with `--algorithm dijkstra`.
+The Python API also supports
+`graph.shortest_path(source, target, algorithm="astar")`.
+
+A* prioritizes the cost so far plus an estimate of the remaining cost. HexPath
+computes that estimate as the minimum directed hop count to the target times
+the smallest edge weight. A reverse breadth-first traversal supplies those hop
+counts and excludes nodes that cannot reach the target. This estimate is a
+lower bound because every remaining route needs at least that many edges,
+each costing at least the minimum weight. IP addresses are not used as spatial
+coordinates. See [Boost's A* documentation](https://www.boost.org/doc/libs/1_74_0/libs/graph/doc/astar_search.html)
+for the search priority `f = g + h`.
+
+The hop-count pass adds O(V + E) work and memory per query. A* can reduce the
+forward search, but a faster total runtime is not guaranteed, especially for
+small graphs or graphs whose edge costs vary widely. Compare both algorithms
+on your saved lab graph before choosing one.
+
+For an offline comparison without scanning or CVE lookups, run the synthetic
+example from the repository root after installing HexPath:
+
+```sh
+.venv/bin/hexpath graph path --graph examples/path-comparison.example.json --target host:target --algorithm dijkstra
+.venv/bin/hexpath graph path --graph examples/path-comparison.example.json --target host:target --algorithm astar
+```
+
+Both should choose `entry:scanner -> host:a -> host:b -> host:target` with a
+total cost of `3.00`, rather than the direct edge costing `10.00`.
+
 The terminal output uses ASCII branches and arrows. Branches are drawn at most
 100 levels deep; a longer route is marked `(continued below: depth limit
 reached)` and its remainder is drawn as a separate tree further down. Pass `--json` to `graph build` or `graph path` when another program needs machine-readable output.
@@ -152,7 +192,7 @@ Each scan contributes reachability only from its recorded vantage. A path can
 therefore continue from the entry point, through a candidate service finding to
 one host, and then through services observed by a scan run from that host.
 
-Candidate exploit costs use `11 - CVSS score`, plus a confidence penalty of `0` for high, `1.5` for medium, or `3` for low confidence. A missing CVSS score uses the neutral value `5.0`. Lower costs are prioritized by Dijkstra's algorithm. These costs rank investigation paths; they are not exploit probabilities.
+Candidate exploit costs use `11 - CVSS score`, plus a confidence penalty of `0` for high, `1.5` for medium, or `3` for low confidence. A missing CVSS score uses the neutral value `5.0`. Both algorithms minimize the total cost. These costs rank investigation paths; they are not exploit probabilities.
 
 ## Tests
 

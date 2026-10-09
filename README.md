@@ -206,6 +206,7 @@ HexPath requires Python 3.11 or newer. Nmap is also required to execute scans.
 ```sh
 python3 -m venv .venv
 .venv/bin/python -m pip install --editable .
+.venv/bin/hexpath setup nmap
 ```
 
 ## Windows executable
@@ -243,6 +244,17 @@ hexpath g x -g graph.json -n 10 -j
 
 Run `hexpath -V` for the installed version. Command-specific help shows both
 forms, such as `hexpath g p -h`.
+
+`hexpath setup nmap` first checks for an existing installation. When Nmap is
+missing, it uses Homebrew on macOS or a supported system package manager on
+Linux, then verifies the installed executable and version. Check without
+installing anything with `hexpath setup nmap --check`.
+
+Windows setup remains manual because Nmap also requires the Npcap network
+driver. Use the [official Nmap installer](https://nmap.org/download.html).
+HexPath invokes Nmap as a separate executable and does not redistribute it;
+embedding Nmap in a distributed product has separate
+[licensing requirements](https://nmap.org/oem/).
 
 ## Scope and scanning
 

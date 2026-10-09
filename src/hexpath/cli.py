@@ -42,6 +42,7 @@ from hexpath.scanner import (
     scan_profile_for_level,
 )
 from hexpath.scope import Scope, ScopeError
+from hexpath.setup import SetupError, find_nmap, setup_nmap, verify_nmap
 from hexpath.vulnerabilities import (
     CpeIdentity,
     NvdClient,
@@ -84,6 +85,21 @@ def build_parser() -> argparse.ArgumentParser:
     assess.add_argument("--output", help="save full assessment evidence as JSON")
     assess.add_argument("--json", action="store_true", help="print JSON instead of terminal summary")
     assess.add_argument("targets", nargs="*", help="explicit IPv6 hosts to scan; omit for saved scans")
+
+    setup_parser = subcommands.add_parser(
+        "setup",
+        help="prepare native tools used by HexPath",
+    )
+    setup_commands = setup_parser.add_subparsers(dest="setup_command", required=True)
+    setup_nmap_parser = setup_commands.add_parser(
+        "nmap",
+        help="install and verify Nmap with the native package manager",
+    )
+    setup_nmap_parser.add_argument(
+        "--check",
+        action="store_true",
+        help="check Nmap without installing it",
+    )
 
     scope_parser = subcommands.add_parser(
         "scope",
@@ -629,7 +645,9 @@ def _read_json_documents(paths: Sequence[str], document_name: str) -> list[objec
 def main(argv: Sequence[str] | None = None) -> int:
     """Run HexPath and return a process exit code."""
     arguments = list(sys.argv[1:] if argv is None else argv)
-    commands = {"scope", "sc", "scan", "s", "cve", "c", "graph", "g", "assess"}
+    commands = {
+        "setup", "scope", "sc", "scan", "s", "cve", "c", "graph", "g", "assess",
+    }
     if not arguments or arguments[0] not in commands | {"-V", "--version"}:
         from hexpath.direct_cli import main as direct_main
         return direct_main(arguments)
@@ -637,6 +655,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(arguments)
 
     try:
+        if args.command == "setup" and args.setup_command == "nmap":
+            if args.check:
+                executable = find_nmap()
+                if executable is None:
+                    print("Nmap is not installed or is not on PATH.")
+                    return 1
+                print(f"ready: {verify_nmap(executable)} ({executable})")
+                return 0
+            result = setup_nmap()
+            action = "installed" if result.installed else "already available"
+            print(f"Nmap {action}: {result.version} ({result.path})")
+            return 0
         if args.command == "assess":
             scope = Scope.from_json_file(args.scope)
             scope = Scope(scope.name, tuple(network for network in scope.networks if network.version == 6))
@@ -937,7 +967,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
                 )
             return 0 if scores else 1
-    except (ScopeError, ScannerError, VulnerabilityError, GraphError, ValueError, OSError) as error:
+    except (
+        ScopeError,
+        ScannerError,
+        VulnerabilityError,
+        GraphError,
+        SetupError,
+        ValueError,
+        OSError,
+    ) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
 

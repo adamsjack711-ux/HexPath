@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import math
+import random
 import unittest
 
 from hexpath.graph import (
@@ -164,6 +166,152 @@ class DijkstraTests(unittest.TestCase):
     def test_rejects_nonpositive_edge_weight(self) -> None:
         with self.assertRaisesRegex(GraphError, "greater than zero"):
             GraphEdge("bad", "a", "b", "transition", 0, "invalid", (evidence(),))
+
+
+class AStarTests(unittest.TestCase):
+    def make_graph(self, links: list[tuple[str, str, float]]) -> AttackGraph:
+        names = {"start", "target", *(name for link in links for name in link[:2])}
+        return AttackGraph(
+            nodes=tuple(
+                GraphNode(name, NodeKind.HOST, name) for name in sorted(names)
+            ),
+            edges=tuple(
+                GraphEdge(
+                    str(index), source, target, "transition", weight,
+                    f"{source} to {target}", (evidence(),),
+                )
+                for index, (source, target, weight) in enumerate(links)
+            ),
+        )
+
+    def test_longer_cheaper_route_beats_direct_route_with_cycles_and_dead_ends(self) -> None:
+        graph = self.make_graph([
+            ("start", "target", 10),
+            ("start", "a", 0.5),
+            ("a", "b", 0.5),
+            ("b", "target", 0.5),
+            ("b", "a", 0.1),
+            ("start", "dead-end", 0.1),
+        ])
+
+        path = graph.shortest_path("start", "target", algorithm="astar")
+
+        self.assertEqual(path.nodes, ("start", "a", "b", "target"))
+        self.assertEqual(path.total_weight, 1.5)
+        self.assertEqual(path, graph.shortest_path("start", "target"))
+
+    def test_replaces_expensive_discovery_and_preserves_selected_edge_evidence(self) -> None:
+        graph = self.make_graph([
+            ("start", "a", 8),
+            ("start", "a", 4),
+            ("start", "b", 1),
+            ("b", "a", 1),
+            ("a", "target", 3),
+        ])
+
+        path = graph.shortest_path("start", "target", algorithm="astar")
+
+        self.assertEqual(path.nodes, ("start", "b", "a", "target"))
+        self.assertEqual(path.edges, (graph.edges[2], graph.edges[3], graph.edges[4]))
+        self.assertEqual(path.total_weight, 5)
+
+    def test_same_node_returns_zero_cost_without_edges(self) -> None:
+        graph = self.make_graph([])
+
+        path = graph.shortest_path("start", "start", algorithm="astar")
+
+        self.assertEqual(path.nodes, ("start",))
+        self.assertEqual(path.edges, ())
+        self.assertEqual(path.total_weight, 0)
+
+    def test_unreachable_target_and_reverse_only_edges(self) -> None:
+        for links in ([], [("target", "start", 1)]):
+            with self.subTest(links=links):
+                graph = self.make_graph(links)
+                self.assertIsNone(
+                    graph.shortest_path("start", "target", algorithm="astar")
+                )
+
+    def test_rejects_unknown_nodes_and_algorithm(self) -> None:
+        graph = self.make_graph([])
+        for source, target, message in (
+            ("missing", "target", "unknown source"),
+            ("start", "missing", "unknown target"),
+            ("missing", "missing", "unknown source"),
+        ):
+            with self.subTest(source=source, target=target):
+                with self.assertRaisesRegex(GraphError, message):
+                    graph.shortest_path(source, target, algorithm="astar")
+        with self.assertRaisesRegex(GraphError, "unknown path algorithm"):
+            graph.shortest_path("start", "start", algorithm="greedy")
+
+    def test_built_graph_keeps_cve_evidence_and_json_schema(self) -> None:
+        scan, cves = sample_documents()
+        graph = build_attack_graph(scan, cves)
+
+        path = graph.shortest_path(
+            ENTRY_NODE_ID, "host:2001:db8::10", algorithm="astar"
+        )
+
+        self.assertEqual(path.to_dict(), graph.shortest_path(
+            ENTRY_NODE_ID, "host:2001:db8::10"
+        ).to_dict())
+        self.assertEqual(path.edges[-1].metadata["cve_id"], "CVE-2024-6387")
+        self.assertIn("CVE-2024-6387", render_path_ascii(graph, path))
+
+    def test_deep_graph_and_fractional_costs(self) -> None:
+        path = chain_graph(2500).shortest_path(
+            ENTRY_NODE_ID, "host:2499", algorithm="astar"
+        )
+        self.assertEqual(len(path.nodes), 2501)
+        self.assertEqual(path.total_weight, 2500)
+        graph = self.make_graph([
+            ("start", "a", 0.333333), ("a", "target", 0.333333),
+            ("start", "target", 0.6667),
+        ])
+        path = graph.shortest_path("start", "target", algorithm="astar")
+        self.assertEqual(path.nodes, ("start", "a", "target"))
+        self.assertEqual(path.total_weight, 0.6667)
+
+    def test_matches_independent_all_pairs_oracle_on_generated_directed_graphs(self) -> None:
+        generator = random.Random(42)
+        names = ("start", "a", "b", "c", "d", "e", "target")
+        for case in range(30):
+            links = [
+                (source, target, generator.choice((0.125, 0.5, 1, 3, 8)))
+                for source in names for target in names
+                if generator.random() < 0.25
+            ]
+            graph = self.make_graph(links)
+            costs = {(a, b): 0.0 if a == b else math.inf for a in names for b in names}
+            for source, target, weight in links:
+                costs[source, target] = min(costs[source, target], weight)
+            # Floyd-Warshall is an independent reference, without a search heap.
+            for via in names:
+                for source in names:
+                    for target in names:
+                        costs[source, target] = min(
+                            costs[source, target],
+                            costs[source, via] + costs[via, target],
+                        )
+            actual_names = {node.node_id for node in graph.nodes}
+            for source in sorted(actual_names):
+                for target in sorted(actual_names):
+                    with self.subTest(case=case, source=source, target=target):
+                        path = graph.shortest_path(source, target, algorithm="astar")
+                        baseline = graph.shortest_path(source, target)
+                        if math.isinf(costs[source, target]):
+                            self.assertIsNone(path)
+                            self.assertIsNone(baseline)
+                        else:
+                            self.assertEqual(path.total_weight, costs[source, target])
+                            self.assertEqual(path.total_weight, baseline.total_weight)
+                            self.assertEqual(path.nodes[0], source)
+                            self.assertEqual(path.nodes[-1], target)
+                            self.assertEqual(
+                                sum(edge.weight for edge in path.edges),
+                                costs[source, target],
+                            )
 
 
 class BuilderTests(unittest.TestCase):

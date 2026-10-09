@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from hexpath.cli import main
 from hexpath.scanner import NmapScanResult
+from hexpath.setup import NmapSetupResult
 from hexpath.vulnerabilities import (
     CpeIdentity,
     CpeVulnerabilityResult,
@@ -20,6 +21,51 @@ from hexpath.vulnerabilities import (
     PackageVulnerabilityResult,
     ScanVulnerabilityResult,
 )
+
+
+class SetupCliTests(unittest.TestCase):
+    @patch("hexpath.cli.verify_nmap", return_value="Nmap version 7.99")
+    @patch("hexpath.cli.find_nmap", return_value="/usr/bin/nmap")
+    def test_check_reports_verified_nmap(self, find_mock, verify_mock) -> None:
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(["setup", "nmap", "--check"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("ready: Nmap version 7.99 (/usr/bin/nmap)", output.getvalue())
+        find_mock.assert_called_once_with()
+        verify_mock.assert_called_once_with("/usr/bin/nmap")
+
+    @patch("hexpath.cli.find_nmap", return_value=None)
+    def test_check_returns_one_when_nmap_is_missing(self, find_mock) -> None:
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(["setup", "nmap", "--check"])
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("not installed", output.getvalue())
+        find_mock.assert_called_once_with()
+
+    @patch(
+        "hexpath.cli.setup_nmap",
+        return_value=NmapSetupResult(
+            path="/opt/homebrew/bin/nmap",
+            version="Nmap version 7.99",
+            installed=True,
+            install_command=("/opt/homebrew/bin/brew", "install", "nmap"),
+        ),
+    )
+    def test_setup_installs_and_reports_nmap(self, setup_mock) -> None:
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(["setup", "nmap"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Nmap installed: Nmap version 7.99", output.getvalue())
+        setup_mock.assert_called_once_with()
 
 
 class ScanCliTests(unittest.TestCase):

@@ -27,6 +27,7 @@ from hexpath.scanner import (
     run_nmap,
 )
 from hexpath.scope import Scope, ScopeError
+from hexpath.setup import SetupError, find_nmap, setup_nmap, verify_nmap
 from hexpath.vulnerabilities import (
     CpeIdentity,
     NvdClient,
@@ -46,6 +47,21 @@ def build_parser() -> argparse.ArgumentParser:
         description="Authorized IPv6 discovery and attack-path analysis",
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
+
+    setup_parser = subcommands.add_parser(
+        "setup",
+        help="prepare native tools used by HexPath",
+    )
+    setup_commands = setup_parser.add_subparsers(dest="setup_command", required=True)
+    setup_nmap_parser = setup_commands.add_parser(
+        "nmap",
+        help="install and verify Nmap with the native package manager",
+    )
+    setup_nmap_parser.add_argument(
+        "--check",
+        action="store_true",
+        help="check Nmap without installing it",
+    )
 
     scope_parser = subcommands.add_parser("scope", help="work with assessment scopes")
     scope_commands = scope_parser.add_subparsers(dest="scope_command", required=True)
@@ -218,6 +234,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        if args.command == "setup" and args.setup_command == "nmap":
+            if args.check:
+                executable = find_nmap()
+                if executable is None:
+                    print("Nmap is not installed or is not on PATH.")
+                    return 1
+                print(f"ready: {verify_nmap(executable)} ({executable})")
+                return 0
+            result = setup_nmap()
+            action = "installed" if result.installed else "already available"
+            print(f"Nmap {action}: {result.version} ({result.path})")
+            return 0
         if args.command == "scope" and args.scope_command == "check":
             scope = Scope.from_json_file(args.scope)
             address = scope.require_authorized(args.target)
@@ -318,7 +346,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 1
             print(path.to_json() if args.json else render_path_ascii(graph, path))
             return 0
-    except (ScopeError, ScannerError, VulnerabilityError, GraphError, ValueError) as error:
+    except (
+        ScopeError,
+        ScannerError,
+        VulnerabilityError,
+        GraphError,
+        SetupError,
+        ValueError,
+    ) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
 

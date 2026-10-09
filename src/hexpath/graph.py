@@ -162,6 +162,29 @@ class AttackGraph:
         """Return the minimum-cost directed path using Dijkstra's algorithm."""
         return self._shortest_path(source, target)
 
+    def ranked_host_paths(self, source: str) -> tuple[ShortestPath, ...]:
+        """Rank the least-cost Dijkstra path to every reachable host."""
+        node_ids = {node.node_id for node in self.nodes}
+        if source not in node_ids:
+            raise GraphError(f"unknown source node {source!r}")
+
+        distances, previous = self._dijkstra(source)
+        paths = [
+            self._reconstruct_path(source, node.node_id, distances, previous)
+            for node in self.nodes
+            if node.kind == NodeKind.HOST
+            and node.node_id != source
+            and node.node_id in distances
+        ]
+        paths.sort(
+            key=lambda path: (
+                path.total_weight,
+                len(path.edges),
+                path.nodes[-1],
+            )
+        )
+        return tuple(paths)
+
     def resolve_node(self, selector: str) -> str:
         """Resolve an exact node ID or an equivalent IP host address."""
         if any(node.node_id == selector for node in self.nodes):
@@ -246,8 +269,26 @@ class AttackGraph:
             raise GraphError(f"unknown source node {source!r}")
         if target not in node_ids:
             raise GraphError(f"unknown target node {target!r}")
-        if source == target:
-            return ShortestPath(nodes=(source,), edges=(), total_weight=0.0)
+        distances, previous = self._dijkstra(
+            source,
+            target=target,
+            excluded_nodes=excluded_nodes,
+            excluded_edges=excluded_edges,
+        )
+        if target not in distances:
+            return None
+        return self._reconstruct_path(source, target, distances, previous)
+
+    def _dijkstra(
+        self,
+        source: str,
+        *,
+        target: str | None = None,
+        excluded_nodes: frozenset[str] = frozenset(),
+        excluded_edges: frozenset[str] = frozenset(),
+    ) -> tuple[dict[str, float], dict[str, GraphEdge]]:
+        """Run one Dijkstra search, optionally stopping at a selected target."""
+        node_ids = {node.node_id for node in self.nodes}
 
         adjacency: dict[str, list[GraphEdge]] = {node_id: [] for node_id in node_ids}
         for edge in self.edges:
@@ -267,7 +308,7 @@ class AttackGraph:
             distance, node_id = heapq.heappop(queue)
             if distance != distances.get(node_id):
                 continue
-            if node_id == target:
+            if target is not None and node_id == target:
                 break
             for edge in adjacency[node_id]:
                 candidate = distance + edge.weight
@@ -276,9 +317,16 @@ class AttackGraph:
                     previous[edge.target] = edge
                     heapq.heappush(queue, (candidate, edge.target))
 
-        if target not in distances:
-            return None
+        return distances, previous
 
+    @staticmethod
+    def _reconstruct_path(
+        source: str,
+        target: str,
+        distances: dict[str, float],
+        previous: dict[str, GraphEdge],
+    ) -> ShortestPath:
+        """Reconstruct one path from Dijkstra's predecessor map."""
         path_edges: list[GraphEdge] = []
         current = target
         while current != source:
@@ -1282,11 +1330,7 @@ def render_path_comparison_ascii(
         return "\n".join(lines)
     lines.extend(["", "Rank  Cost     Delta    Candidate findings"])
     for rank, path in enumerate(paths, 1):
-        findings = "; ".join(
-            f"{_terminal_text(str(edge.metadata['cve_id']))} "
-            f"({_terminal_text(str(edge.metadata.get('confidence', 'unknown')))})"
-            for edge in path.edges if edge.metadata.get("cve_id")
-        ) or "No candidate CVE transitions"
+        findings = _path_findings(path)
         delta = path.total_weight - paths[0].total_weight
         lines.append(f"{rank:<4}  {path.total_weight:<7.2f}  +{delta:<7.2f} {findings}")
     for rank, path in enumerate(paths, 1):
@@ -1295,6 +1339,133 @@ def render_path_comparison_ascii(
         lines.extend([f"Route {rank}", *rendered[2:]])
     lines.extend(["", "Costs rank investigation routes; candidate CVEs do not confirm exploitation."])
     return "\n".join(lines)
+
+
+def vulnerable_path_ranking_document(
+    graph: AttackGraph,
+    source: str,
+    paths: tuple[ShortestPath, ...],
+    *,
+    limit: int,
+) -> dict[str, Any]:
+    """Serialize the most vulnerable host path and lower-ranked alternatives."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
+        raise GraphError("path limit must be an integer between 1 and 20")
+    nodes = {node.node_id: node for node in graph.nodes}
+    reported = paths[:limit]
+    reachable_targets = {path.nodes[-1] for path in paths}
+    unreachable = [
+        node.to_dict()
+        for node in sorted(graph.nodes, key=lambda item: item.node_id)
+        if node.kind == NodeKind.HOST
+        and node.node_id != source
+        and node.node_id not in reachable_targets
+    ]
+    entries = [
+        _ranked_host_path_entry(nodes, path, rank)
+        for rank, path in enumerate(reported, 1)
+    ]
+    return {
+        "algorithm": "dijkstra",
+        "source": source,
+        "cost_interpretation": "lower cost indicates a more vulnerable route",
+        "analyzed_hosts": len(reachable_targets) + len(unreachable),
+        "reachable_hosts": len(reachable_targets),
+        "reported_paths": len(entries),
+        "most_vulnerable_path": entries[0] if entries else None,
+        "alternative_paths": entries[1:],
+        "unreachable_hosts": unreachable,
+    }
+
+
+def render_vulnerable_path_ranking_ascii(
+    graph: AttackGraph,
+    source: str,
+    paths: tuple[ShortestPath, ...],
+    *,
+    limit: int,
+) -> str:
+    """Render network-wide Dijkstra host-path rankings for the terminal."""
+    document = vulnerable_path_ranking_document(
+        graph,
+        source,
+        paths,
+        limit=limit,
+    )
+    lines = [
+        "HexPath Most Vulnerable Path",
+        "============================",
+        f"Source: {_terminal_text(source)}",
+    ]
+    if not paths:
+        lines.append("No evidence-backed directed path reaches another host.")
+        lines.append(
+            f"Hosts analyzed: {document['analyzed_hosts']}  Reachable: 0"
+        )
+        return "\n".join(lines)
+
+    nodes = {node.node_id: node for node in graph.nodes}
+    reported = paths[:limit]
+    lines.extend(
+        [
+            "Lower cost indicates a more vulnerable route.",
+            "",
+            "Rank  Cost     Target                         Candidate findings",
+        ]
+    )
+    for rank, path in enumerate(reported, 1):
+        target = nodes[path.nodes[-1]]
+        findings = _path_findings(path)
+        lines.append(
+            f"{rank:<4}  {path.total_weight:<7.2f}  "
+            f"{_terminal_text(target.node_id):<29}  {findings}"
+        )
+
+    lines.extend(["", "Most vulnerable route", "---------------------"])
+    rendered = render_path_ascii(graph, reported[0]).splitlines()
+    lines.extend(rendered[2:])
+    lines.extend(
+        [
+            "",
+            f"Hosts analyzed: {document['analyzed_hosts']}  "
+            f"Reachable: {document['reachable_hosts']}  "
+            f"Shown: {document['reported_paths']}",
+            "Candidate CVEs rank investigation paths; they do not confirm exploitation.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _ranked_host_path_entry(
+    nodes: dict[str, GraphNode],
+    path: ShortestPath,
+    rank: int,
+) -> dict[str, Any]:
+    target = nodes[path.nodes[-1]]
+    return {
+        "rank": rank,
+        "target": target.to_dict(),
+        "candidate_findings": [
+            {
+                "cve_id": edge.metadata["cve_id"],
+                "confidence": edge.metadata.get("confidence"),
+                "cvss_score": edge.metadata.get("cvss_score"),
+            }
+            for edge in path.edges
+            if edge.metadata.get("cve_id")
+        ],
+        "path": path.to_dict(),
+    }
+
+
+def _path_findings(path: ShortestPath) -> str:
+    findings = "; ".join(
+        f"{_terminal_text(str(edge.metadata['cve_id']))} "
+        f"({_terminal_text(str(edge.metadata.get('confidence', 'unknown')))})"
+        for edge in path.edges
+        if edge.metadata.get("cve_id")
+    )
+    return findings or "No candidate CVE transitions"
 
 
 def _ascii_node(node: GraphNode) -> str:

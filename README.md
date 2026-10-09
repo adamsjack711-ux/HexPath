@@ -144,6 +144,17 @@ followed by ranked routes showing total cost, the difference from the cheapest
 route, candidate CVEs, and confidence. `-oJ` and `--json` include this comparison
 under `path_comparison` alongside the scan, CVEs, and graph.
 
+To let HexPath select the most vulnerable reachable host, scan one or more
+targets with network-wide ranking enabled:
+
+```sh
+hexpath --most-vulnerable --rank-limit 10 192.0.2.10 192.0.2.20
+```
+
+HexPath runs Dijkstra once from the entry point, finds the least-cost route to
+every reachable host, and ranks the results. The complete ranking is included
+under `vulnerable_path_ranking` when using `-oJ` or `--json`.
+
 ## Full server topology
 
 Show the complete topology of a server that is already available through SSH:
@@ -264,6 +275,19 @@ hexpath graph path \
   --target host:2001:db8:1::10
 ```
 
+Find the most vulnerable path without selecting a destination first:
+
+```sh
+hexpath graph vulnerable --graph graph.json
+hexpath graph vulnerable --graph graph.json --limit 10 --json
+```
+
+This runs a single-source Dijkstra search and ranks the least-cost route to
+every reachable host. The first result is the modeled most vulnerable route;
+the JSON output includes that path, alternatives, candidate CVE evidence, and
+hosts that have no evidence-backed route. The command returns `1` when no other
+host is reachable from the selected source.
+
 List the available hosts before selecting a target:
 
 ```sh
@@ -302,6 +326,119 @@ therefore continue from the entry point, through a candidate service finding to
 one host, and then through services observed by a scan run from that host.
 
 Candidate exploit costs use `11 - CVSS score`, plus a confidence penalty of `0` for high, `1.5` for medium, or `3` for low confidence. A missing CVSS score uses the neutral value `5.0`. Lower costs are prioritized by Dijkstra's algorithm. These costs rank investigation paths; they are not exploit probabilities.
+
+Network-wide ranking identifies the easiest evidence-backed route in the graph.
+It does not account for business importance, data sensitivity, or blast radius;
+use `graph path --target` when a specific critical asset is the destination.
+
+## Remaining engineering work
+
+The shortest-path engine, target comparison, IPv4 support, and network-wide
+Dijkstra ranking are implemented. The next milestone is a transparent HexPath
+Network Exposure Score from `0` to `100`. The score must describe an observed
+network route, rather than presenting CVSS as a network-risk score. Dijkstra's
+raw additive cost should remain available for path finding and debugging.
+
+### Integrate the current branch stack
+
+Complete the existing work in dependency order before starting overlapping
+changes to path ranking:
+
+- [ ] Merge [PR #10](https://github.com/adamsjack711-ux/HexPath/pull/10), the
+  port-range validation fix, into `feat/target-path-comparison`.
+- [ ] Open and merge `feat/target-path-comparison` into `main`.
+- [ ] Retarget or rebase and merge
+  [PR #8](https://github.com/adamsjack711-ux/HexPath/pull/8), IPv4 support.
+- [ ] Retarget or rebase and merge
+  [PR #11](https://github.com/adamsjack711-ux/HexPath/pull/11), network-wide
+  Dijkstra ranking.
+- [ ] Run the full test suite after the branches are combined.
+
+### Specify the network score
+
+Agree on and document a versioned formula before implementing it. Each result
+should expose the final score, the formula version, every component score, and
+the raw observations used to calculate it. The first version should consider:
+
+- **Route accessibility:** confirmed-open and uncertain filtered transitions.
+- **Path depth:** the number of required host compromises and pivot points.
+- **Route redundancy:** independent evidence-backed routes to the target.
+- **Blast radius:** the proportion of hosts reachable after the target is
+  compromised.
+- **Exploit evidence:** CVSS, match confidence, and supporting evidence on the
+  selected route. CVSS remains a severity input and is not treated as an
+  exploitation probability.
+
+Network-wide quantities must be normalized so the score remains between `0`
+and `100` on small and large graphs. Adding unrelated hosts must not change a
+route's accessibility or path-depth components. Adding a real alternate route
+or downstream host may change redundancy or blast radius because it changes the
+network represented by the graph.
+
+Suggested JSON shape:
+
+```json
+{
+  "network_score": 84,
+  "score_version": "hexpath-network-v1",
+  "components": {
+    "route_accessibility": 31,
+    "path_depth": 17,
+    "route_redundancy": 12,
+    "blast_radius": 16,
+    "exploit_evidence": 8
+  }
+}
+```
+
+The example values above illustrate the output shape; they are not an accepted
+formula or grading standard.
+
+### Implement and expose the score
+
+- [ ] Add graph analysis for pivot depth, filtered transitions, independent
+  routes, chokepoints, and downstream host reachability.
+- [ ] Calculate a deterministic score for every reachable host while retaining
+  its raw Dijkstra cost and reconstructed route.
+- [ ] Rank `graph vulnerable` and `--most-vulnerable` results by network score.
+- [ ] Add component explanations to terminal output and JSON output.
+- [ ] Keep unreachable hosts explicit and leave their route score unset.
+- [ ] Document the formula, assumptions, and limitations next to the command
+  examples.
+
+### Verification and scale
+
+- [ ] Test that direct open routes outrank otherwise equivalent filtered or
+  multi-pivot routes.
+- [ ] Test that independent routes and downstream reach affect only their
+  documented components.
+- [ ] Test IPv4 and IPv6 graphs, unreachable hosts, cycles, tied scores, and
+  missing CVSS values.
+- [ ] Assert that every emitted score is deterministic and within `0` to `100`.
+- [ ] Add permanent 100-host and 1,000-host fixtures and record runtime and
+  memory use for sparse and dense graphs.
+- [ ] Run an authorized multi-vantage lab assessment with at least one pivot,
+  save its graph, and compare the reported ranking with the expected topology.
+
+### Suggested work split
+
+Claim a task in a GitHub issue before editing, name the expected files, and use
+a separate worktree and branch. The graph API should be completed before the
+CLI-output task consumes it.
+
+| Work stream | Primary files | Dependency |
+| --- | --- | --- |
+| Branch integration | Pull requests and CI | None |
+| Score specification | `README.md` or a new design document | Team agreement |
+| Graph metrics and score API | `src/hexpath/graph.py`, `tests/test_graph.py` | Score specification |
+| CLI and JSON presentation | `src/hexpath/cli.py`, `tests/test_cli.py` | Stable graph score API |
+| Large fixtures and performance | New files under `tests/fixtures/` plus focused tests | Stable score API |
+| Lab validation and examples | `examples/` and documentation | Working end-to-end score |
+
+After the network score is stable, possible follow-up work includes EPSS and
+CISA KEV enrichment, explicit network zones and trust boundaries, asset
+criticality as a separate impact dimension, vulnerability-response caching,
+and a tagged release with reproducible example graphs.
 
 ## Tests
 

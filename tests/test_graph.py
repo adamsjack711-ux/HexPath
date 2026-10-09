@@ -20,6 +20,8 @@ from hexpath.graph import (
     render_path_comparison_ascii,
     render_server_inventory_ascii,
     render_topology_ascii,
+    render_vulnerable_path_ranking_ascii,
+    vulnerable_path_ranking_document,
     vulnerability_cost,
 )
 from hexpath.models import Confidence, Evidence, EvidenceLevel
@@ -168,6 +170,159 @@ class DijkstraTests(unittest.TestCase):
     def test_rejects_nonpositive_edge_weight(self) -> None:
         with self.assertRaisesRegex(GraphError, "greater than zero"):
             GraphEdge("bad", "a", "b", "transition", 0, "invalid", (evidence(),))
+
+    def test_ranks_shortest_path_to_every_reachable_host(self) -> None:
+        nodes = (
+            GraphNode("entry", NodeKind.ENTRY, "entry"),
+            GraphNode("service:a", NodeKind.SERVICE, "service a"),
+            GraphNode("service:b", NodeKind.SERVICE, "service b"),
+            GraphNode("host:a", NodeKind.HOST, "host a"),
+            GraphNode("host:b", NodeKind.HOST, "host b"),
+            GraphNode("host:c", NodeKind.HOST, "host c"),
+        )
+        edges = (
+            GraphEdge("ea", "entry", "service:a", "reach", 1, "ea", (evidence(),)),
+            GraphEdge("ah", "service:a", "host:a", "exploit", 4, "ah", (evidence(),)),
+            GraphEdge("eb", "entry", "service:b", "reach", 1, "eb", (evidence(),)),
+            GraphEdge(
+                "bh",
+                "service:b",
+                "host:b",
+                "exploit",
+                2,
+                "bh",
+                (evidence(),),
+                {"cve_id": "CVE-2026-12345", "confidence": "high"},
+            ),
+        )
+        graph = AttackGraph(nodes=nodes, edges=edges)
+
+        paths = graph.ranked_host_paths("entry")
+
+        self.assertEqual([path.nodes[-1] for path in paths], ["host:b", "host:a"])
+        self.assertEqual([path.total_weight for path in paths], [3.0, 5.0])
+        for path in paths:
+            self.assertEqual(path, graph.shortest_path("entry", path.nodes[-1]))
+
+        document = vulnerable_path_ranking_document(
+            graph,
+            "entry",
+            paths,
+            limit=10,
+        )
+        self.assertEqual(document["algorithm"], "dijkstra")
+        self.assertEqual(
+            document["most_vulnerable_path"]["target"]["id"],
+            "host:b",
+        )
+        self.assertEqual(document["most_vulnerable_path"]["rank"], 1)
+        self.assertEqual(
+            document["most_vulnerable_path"]["candidate_findings"][0]["cve_id"],
+            "CVE-2026-12345",
+        )
+        self.assertEqual(
+            [host["id"] for host in document["unreachable_hosts"]],
+            ["host:c"],
+        )
+        rendered = render_vulnerable_path_ranking_ascii(
+            graph,
+            "entry",
+            paths,
+            limit=10,
+        )
+        self.assertIn("HexPath Most Vulnerable Path", rendered)
+        self.assertIn("host:b", rendered)
+        self.assertIn("Total cost: 3.00", rendered)
+
+    def test_host_path_ranking_handles_no_reachable_hosts(self) -> None:
+        graph = AttackGraph(
+            nodes=(
+                GraphNode("entry", NodeKind.ENTRY, "entry"),
+                GraphNode("host:a", NodeKind.HOST, "host a"),
+            ),
+            edges=(),
+        )
+
+        paths = graph.ranked_host_paths("entry")
+        document = vulnerable_path_ranking_document(
+            graph,
+            "entry",
+            paths,
+            limit=3,
+        )
+
+        self.assertEqual(paths, ())
+        self.assertIsNone(document["most_vulnerable_path"])
+        self.assertEqual(document["reachable_hosts"], 0)
+        self.assertIn(
+            "No evidence-backed directed path",
+            render_vulnerable_path_ranking_ascii(
+                graph,
+                "entry",
+                paths,
+                limit=3,
+            ),
+        )
+
+    def test_host_path_ranking_rejects_unknown_source_and_invalid_limit(self) -> None:
+        graph = AttackGraph(
+            nodes=(GraphNode("entry", NodeKind.ENTRY, "entry"),),
+            edges=(),
+        )
+        with self.assertRaisesRegex(GraphError, "unknown source"):
+            graph.ranked_host_paths("missing")
+        for limit in (0, 21, True):
+            with self.subTest(limit=limit), self.assertRaises(GraphError):
+                vulnerable_path_ranking_document(
+                    graph,
+                    "entry",
+                    (),
+                    limit=limit,
+                )
+
+    def test_single_search_ranking_matches_individual_dijkstra_paths(self) -> None:
+        rng = random.Random(2026)
+        for case in range(40):
+            names = ("entry", "host:a", "host:b", "host:c", "host:d")
+            nodes = (
+                GraphNode("entry", NodeKind.ENTRY, "entry"),
+                *(
+                    GraphNode(name, NodeKind.HOST, name)
+                    for name in names[1:]
+                ),
+            )
+            edges = []
+            for source in names:
+                for target in names:
+                    if source != target and rng.random() < 0.35:
+                        edge_id = f"{source}-{target}"
+                        edges.append(
+                            GraphEdge(
+                                edge_id,
+                                source,
+                                target,
+                                "transition",
+                                rng.randint(1, 9),
+                                edge_id,
+                                (evidence(),),
+                            )
+                        )
+            graph = AttackGraph(nodes=nodes, edges=tuple(edges))
+            expected = [
+                path
+                for target in names[1:]
+                if (path := graph.shortest_path("entry", target)) is not None
+            ]
+            expected.sort(
+                key=lambda path: (
+                    path.total_weight,
+                    len(path.edges),
+                    path.nodes[-1],
+                )
+            )
+
+            with self.subTest(case=case):
+                self.assertEqual(graph.ranked_host_paths("entry"), tuple(expected))
 
 
 class PathComparisonTests(unittest.TestCase):

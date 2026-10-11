@@ -16,8 +16,13 @@ from hexpath.graph import (
     GraphNode,
     NodeKind,
     build_attack_graph,
+    path_comparison_document,
     render_attack_graph_ascii,
+    render_host_targets_ascii,
     render_path_ascii,
+    render_path_comparison_ascii,
+    render_vulnerable_path_ranking_ascii,
+    vulnerable_path_ranking_document,
     vulnerability_cost,
 )
 from hexpath.models import Confidence, Evidence, EvidenceLevel
@@ -167,6 +172,425 @@ class DijkstraTests(unittest.TestCase):
         with self.assertRaisesRegex(GraphError, "greater than zero"):
             GraphEdge("bad", "a", "b", "transition", 0, "invalid", (evidence(),))
 
+    def test_ranks_shortest_path_to_every_reachable_host(self) -> None:
+        nodes = (
+            GraphNode("entry", NodeKind.ENTRY, "entry"),
+            GraphNode("service:a", NodeKind.SERVICE, "service a"),
+            GraphNode("service:b", NodeKind.SERVICE, "service b"),
+            GraphNode("host:a", NodeKind.HOST, "host a"),
+            GraphNode("host:b", NodeKind.HOST, "host b"),
+            GraphNode("host:c", NodeKind.HOST, "host c"),
+        )
+        edges = (
+            GraphEdge("ea", "entry", "service:a", "reach", 1, "ea", (evidence(),)),
+            GraphEdge("ah", "service:a", "host:a", "exploit", 4, "ah", (evidence(),)),
+            GraphEdge("eb", "entry", "service:b", "reach", 1, "eb", (evidence(),)),
+            GraphEdge(
+                "bh",
+                "service:b",
+                "host:b",
+                "exploit",
+                2,
+                "bh",
+                (evidence(),),
+                {
+                    "cve_id": "CVE-2026-12345",
+                    "confidence": "high",
+                    "cvss_score": 9.0,
+                },
+            ),
+        )
+        graph = AttackGraph(nodes=nodes, edges=edges)
+
+        paths = graph.ranked_host_paths("entry")
+
+        self.assertEqual([path.nodes[-1] for path in paths], ["host:b", "host:a"])
+        self.assertEqual([path.total_weight for path in paths], [3.0, 5.0])
+        for path in paths:
+            self.assertEqual(path, graph.shortest_path("entry", path.nodes[-1]))
+
+        document = vulnerable_path_ranking_document(
+            graph,
+            "entry",
+            paths,
+            limit=10,
+        )
+        self.assertEqual(document["algorithm"], "dijkstra")
+        self.assertEqual(
+            document["most_vulnerable_path"]["target"]["id"],
+            "host:b",
+        )
+        self.assertEqual(document["most_vulnerable_path"]["rank"], 1)
+        self.assertEqual(
+            document["most_vulnerable_path"]["candidate_findings"][0],
+            {
+                "cve_id": "CVE-2026-12345",
+                "confidence": "high",
+                "cvss_score": 9.0,
+            },
+        )
+        self.assertEqual(
+            [host["id"] for host in document["unreachable_hosts"]],
+            ["host:c"],
+        )
+        rendered = render_vulnerable_path_ranking_ascii(
+            graph,
+            "entry",
+            paths,
+            limit=10,
+        )
+        self.assertIn("HexPath Network Exposure Ranking", rendered)
+        self.assertIn("Score components:", rendered)
+        self.assertIn("host:b", rendered)
+        self.assertIn("Total cost: 3.00", rendered)
+
+    def test_host_path_ranking_handles_no_reachable_hosts(self) -> None:
+        graph = AttackGraph(
+            nodes=(
+                GraphNode("entry", NodeKind.ENTRY, "entry"),
+                GraphNode("host:192.0.2.10", NodeKind.HOST, "host a"),
+            ),
+            edges=(),
+        )
+
+        paths = graph.ranked_host_paths("entry")
+        document = vulnerable_path_ranking_document(
+            graph,
+            "entry",
+            paths,
+            limit=3,
+        )
+
+        self.assertEqual(paths, ())
+        self.assertIsNone(document["most_vulnerable_path"])
+        self.assertEqual(document["reachable_hosts"], 0)
+        self.assertEqual(document["analyzed_hosts"], 1)
+        self.assertIn(
+            "No evidence-backed directed path",
+            render_vulnerable_path_ranking_ascii(
+                graph,
+                "entry",
+                paths,
+                limit=3,
+            ),
+        )
+
+    def test_host_path_ranking_rejects_unknown_source_and_invalid_limit(self) -> None:
+        graph = AttackGraph(
+            nodes=(GraphNode("entry", NodeKind.ENTRY, "entry"),),
+            edges=(),
+        )
+        with self.assertRaisesRegex(GraphError, "unknown source"):
+            graph.ranked_host_paths("missing")
+        for limit in (0, 21, True):
+            with self.subTest(limit=limit), self.assertRaises(GraphError):
+                vulnerable_path_ranking_document(
+                    graph,
+                    "entry",
+                    (),
+                    limit=limit,
+                )
+
+    def test_single_search_ranking_matches_individual_dijkstra_paths(self) -> None:
+        generator = random.Random(2026)
+        for case in range(40):
+            names = ("entry", "host:a", "host:b", "host:c", "host:d")
+            nodes = (
+                GraphNode("entry", NodeKind.ENTRY, "entry"),
+                *(GraphNode(name, NodeKind.HOST, name) for name in names[1:]),
+            )
+            edges = []
+            for source in names:
+                for target in names:
+                    if source != target and generator.random() < 0.35:
+                        edge_id = f"{source}-{target}"
+                        edges.append(
+                            GraphEdge(
+                                edge_id,
+                                source,
+                                target,
+                                "transition",
+                                generator.randint(1, 9),
+                                edge_id,
+                                (evidence(),),
+                            )
+                        )
+            graph = AttackGraph(nodes=nodes, edges=tuple(edges))
+            expected = [
+                path
+                for target in names[1:]
+                if (path := graph.shortest_path("entry", target)) is not None
+            ]
+            expected.sort(
+                key=lambda path: (
+                    path.total_weight,
+                    len(path.edges),
+                    path.nodes[-1],
+                )
+            )
+
+            with self.subTest(case=case):
+                self.assertEqual(graph.ranked_host_paths("entry"), tuple(expected))
+
+
+class ExposureScoreTests(unittest.TestCase):
+    @staticmethod
+    def exploit_edge(
+        edge_id: str,
+        source: str,
+        target: str,
+        *,
+        cvss_score: float | None = 10.0,
+        confidence: str = "high",
+        level: EvidenceLevel = EvidenceLevel.OBSERVED,
+        weight: float = 1.0,
+    ) -> GraphEdge:
+        return GraphEdge(
+            edge_id,
+            source,
+            target,
+            "candidate_exploit",
+            weight,
+            f"{source} to {target}",
+            (
+                Evidence(
+                    source="score-test",
+                    summary="Candidate exploit evidence",
+                    level=level,
+                    collected_at=COLLECTED_AT,
+                ),
+            ),
+            {
+                "cve_id": f"CVE-2026-{edge_id.upper()}",
+                "cvss_score": cvss_score,
+                "confidence": confidence,
+            },
+        )
+
+    @staticmethod
+    def reachability_edge(
+        edge_id: str,
+        source: str,
+        target: str,
+        state: str,
+        *,
+        weight: float = 1.0,
+    ) -> GraphEdge:
+        return GraphEdge(
+            edge_id,
+            source,
+            target,
+            "observed_reachability",
+            weight,
+            f"{source} reached {target}",
+            (evidence(),),
+            {"service_states": [state]},
+        )
+
+    def test_accessibility_depth_and_score_order_are_independent_of_raw_cost(self) -> None:
+        graph = AttackGraph(
+            nodes=(
+                GraphNode("entry", NodeKind.ENTRY, "entry"),
+                GraphNode("service:open", NodeKind.SERVICE, "open service"),
+                GraphNode("service:filtered", NodeKind.SERVICE, "filtered service"),
+                GraphNode("service:pivot", NodeKind.SERVICE, "pivot service"),
+                GraphNode("service:deep", NodeKind.SERVICE, "deep service"),
+                GraphNode("host:open", NodeKind.HOST, "open host"),
+                GraphNode("host:filtered", NodeKind.HOST, "filtered host"),
+                GraphNode("host:pivot", NodeKind.HOST, "pivot host"),
+                GraphNode("host:deep", NodeKind.HOST, "deep host"),
+            ),
+            edges=(
+                self.reachability_edge(
+                    "open-reach", "entry", "service:open", "open", weight=10
+                ),
+                self.exploit_edge(
+                    "open", "service:open", "host:open", weight=10
+                ),
+                self.reachability_edge(
+                    "filtered-reach",
+                    "entry",
+                    "service:filtered",
+                    "filtered",
+                    weight=0.5,
+                ),
+                self.exploit_edge(
+                    "filtered", "service:filtered", "host:filtered", weight=0.5
+                ),
+                self.reachability_edge(
+                    "pivot-reach", "entry", "service:pivot", "open"
+                ),
+                self.exploit_edge("pivot", "service:pivot", "host:pivot"),
+                self.reachability_edge(
+                    "deep-reach", "host:pivot", "service:deep", "open"
+                ),
+                self.exploit_edge("deep", "service:deep", "host:deep"),
+            ),
+        )
+
+        scores = {score.target: score for score in graph.ranked_host_exposures("entry")}
+
+        self.assertEqual(scores["host:open"].components["route_accessibility"], 30.0)
+        self.assertEqual(
+            scores["host:filtered"].components["route_accessibility"], 7.5
+        )
+        self.assertEqual(scores["host:open"].components["path_depth"], 15.0)
+        self.assertEqual(scores["host:deep"].components["path_depth"], 7.5)
+        ranked = graph.ranked_host_exposures("entry")
+        self.assertLess(
+            scores["host:filtered"].path.total_weight,
+            scores["host:open"].path.total_weight,
+        )
+        self.assertLess(
+            scores["host:filtered"].network_score,
+            scores["host:open"].network_score,
+        )
+        self.assertLess(
+            [score.target for score in ranked].index("host:open"),
+            [score.target for score in ranked].index("host:filtered"),
+        )
+
+    def test_redundancy_counts_independent_routes_not_parallel_cves(self) -> None:
+        graph = AttackGraph(
+            nodes=(
+                GraphNode("entry", NodeKind.ENTRY, "entry"),
+                GraphNode("service:a", NodeKind.SERVICE, "service a"),
+                GraphNode("service:b", NodeKind.SERVICE, "service b"),
+                GraphNode("host:target", NodeKind.HOST, "target"),
+            ),
+            edges=(
+                self.reachability_edge("ea", "entry", "service:a", "open"),
+                self.exploit_edge("a1", "service:a", "host:target"),
+                self.exploit_edge("a2", "service:a", "host:target"),
+                self.reachability_edge("eb", "entry", "service:b", "open"),
+                self.exploit_edge("b", "service:b", "host:target"),
+            ),
+        )
+
+        score = graph.ranked_host_exposures("entry")[0]
+
+        self.assertEqual(score.observations["independent_routes"], 2)
+        self.assertEqual(score.components["route_redundancy"], 5.0)
+
+    def test_blast_radius_counts_only_downstream_hosts(self) -> None:
+        graph = AttackGraph(
+            nodes=(
+                GraphNode("entry", NodeKind.ENTRY, "entry"),
+                *(GraphNode(f"service:{name}", NodeKind.SERVICE, name) for name in "abc"),
+                *(GraphNode(f"host:{name}", NodeKind.HOST, name) for name in "abc"),
+            ),
+            edges=(
+                self.reachability_edge("ea", "entry", "service:a", "open"),
+                self.exploit_edge("a", "service:a", "host:a"),
+                self.reachability_edge("ab", "host:a", "service:b", "open"),
+                self.exploit_edge("b", "service:b", "host:b"),
+                self.reachability_edge("ac", "host:a", "service:c", "open"),
+                self.exploit_edge("c", "service:c", "host:c"),
+            ),
+        )
+
+        scores = {score.target: score for score in graph.ranked_host_exposures("entry")}
+
+        self.assertEqual(scores["host:a"].observations["downstream_hosts"], 2)
+        self.assertEqual(scores["host:a"].observations["eligible_blast_hosts"], 2)
+        self.assertEqual(scores["host:a"].components["blast_radius"], 15.0)
+        self.assertEqual(scores["host:b"].components["blast_radius"], 0.0)
+
+    def test_scores_are_deterministic_bounded_and_handle_missing_cvss(self) -> None:
+        graph = AttackGraph(
+            nodes=(
+                GraphNode("entry", NodeKind.ENTRY, "entry"),
+                GraphNode("service:4", NodeKind.SERVICE, "IPv4 service"),
+                GraphNode("service:6", NodeKind.SERVICE, "IPv6 service"),
+                GraphNode("host:192.0.2.10", NodeKind.HOST, "IPv4 host"),
+                GraphNode("host:2001:db8::10", NodeKind.HOST, "IPv6 host"),
+                GraphNode("host:192.0.2.99", NodeKind.HOST, "unreachable"),
+            ),
+            edges=(
+                self.reachability_edge("e4", "entry", "service:4", "open"),
+                self.exploit_edge(
+                    "x4",
+                    "service:4",
+                    "host:192.0.2.10",
+                    cvss_score=None,
+                    confidence="medium",
+                    level=EvidenceLevel.INFERRED,
+                ),
+                self.reachability_edge("e6", "entry", "service:6", "open"),
+                self.exploit_edge(
+                    "x6",
+                    "service:6",
+                    "host:2001:db8::10",
+                    cvss_score=None,
+                    confidence="medium",
+                    level=EvidenceLevel.INFERRED,
+                ),
+                GraphEdge(
+                    "cycle",
+                    "host:192.0.2.10",
+                    "service:4",
+                    "transition",
+                    1,
+                    "cycle",
+                    (evidence(),),
+                ),
+            ),
+        )
+
+        first = graph.ranked_host_exposures("entry")
+        second = graph.ranked_host_exposures("entry")
+
+        self.assertEqual(first, second)
+        self.assertEqual(
+            [score.target for score in first],
+            ["host:192.0.2.10", "host:2001:db8::10"],
+        )
+        for score in first:
+            self.assertEqual(score.network_score, 51.09)
+            self.assertEqual(score.observations["missing_cvss"], 1)
+            self.assertGreaterEqual(score.network_score, 0.0)
+            self.assertLessEqual(score.network_score, 100.0)
+            self.assertEqual(
+                score.network_score,
+                round(math.fsum(score.components.values()), 2),
+            )
+
+        document = vulnerable_path_ranking_document(graph, "entry", first, limit=10)
+        self.assertEqual(document["score_version"], "hexpath-network-v1")
+        self.assertEqual(document["ranking"], "network_score_descending")
+        self.assertIsNone(document["unreachable_hosts"][0]["network_score"])
+
+    def test_scores_ten_thousand_node_sparse_graph(self) -> None:
+        host_count = 10_000
+        graph = AttackGraph(
+            nodes=(
+                GraphNode("entry", NodeKind.ENTRY, "entry"),
+                *(
+                    GraphNode(f"host:{index}", NodeKind.HOST, f"host {index}")
+                    for index in range(host_count)
+                ),
+            ),
+            edges=tuple(
+                GraphEdge(
+                    f"edge:{index}",
+                    "entry",
+                    f"host:{index}",
+                    "transition",
+                    1,
+                    "direct test transition",
+                    (evidence(),),
+                )
+                for index in range(host_count)
+            ),
+        )
+
+        scores = graph.ranked_host_exposures("entry")
+
+        self.assertEqual(len(scores), host_count)
+        self.assertEqual(scores[0].target, "host:0")
+        self.assertEqual(scores[-1].target, "host:9999")
+        self.assertTrue(all(score.network_score == 15.0 for score in scores))
+
 
 class AStarTests(unittest.TestCase):
     def make_graph(self, links: list[tuple[str, str, float]]) -> AttackGraph:
@@ -314,7 +738,211 @@ class AStarTests(unittest.TestCase):
                             )
 
 
+class PathComparisonTests(unittest.TestCase):
+    def make_graph(self, links: list[tuple[str, str, str, float]]) -> AttackGraph:
+        names = {
+            "s",
+            "a",
+            "b",
+            "c",
+            "t",
+            *(name for _, source, target, _ in links for name in (source, target)),
+        }
+        return AttackGraph(
+            nodes=tuple(
+                GraphNode(name, NodeKind.HOST, name) for name in sorted(names)
+            ),
+            edges=tuple(
+                GraphEdge(
+                    edge_id,
+                    source,
+                    target,
+                    "transition",
+                    weight,
+                    edge_id,
+                    (evidence(),),
+                )
+                for edge_id, source, target, weight in links
+            ),
+        )
+
+    def test_preserves_parallel_edges_and_excludes_cycles(self) -> None:
+        graph = self.make_graph(
+            [
+                ("sa", "s", "a", 1),
+                ("as", "a", "s", 1),
+                ("at-1", "a", "t", 2),
+                ("at-2", "a", "t", 4),
+                ("st", "s", "t", 9),
+                ("aa", "a", "a", 1),
+            ]
+        )
+
+        paths = graph.shortest_paths("s", "t", limit=20)
+
+        self.assertEqual([path.total_weight for path in paths], [3, 5, 9])
+        self.assertEqual(paths[0].nodes, paths[1].nodes)
+        self.assertNotEqual(paths[0].edges[-1].edge_id, paths[1].edges[-1].edge_id)
+        self.assertTrue(all(len(path.nodes) == len(set(path.nodes)) for path in paths))
+        self.assertEqual(graph.shortest_paths("t", "s"), ())
+        self.assertEqual(graph.shortest_paths("s", "s")[0].nodes, ("s",))
+        self.assertEqual(len(graph.shortest_paths("s", "t", limit=1)), 1)
+        with self.assertRaisesRegex(GraphError, "unknown target"):
+            graph.shortest_paths("s", "missing")
+        for limit in (0, 21, True, 1.5):
+            with self.subTest(limit=limit), self.assertRaises(GraphError):
+                graph.shortest_paths("s", "t", limit=limit)
+
+    def test_ranked_costs_match_exhaustive_simple_paths(self) -> None:
+        generator = random.Random(719)
+        names = ("s", "a", "b", "c", "t")
+        for case in range(30):
+            links = []
+            for source in names:
+                for target in names:
+                    if source != target and generator.random() < 0.4:
+                        for parallel in range(generator.randint(1, 2)):
+                            links.append(
+                                (
+                                    f"{source}-{target}-{parallel}",
+                                    source,
+                                    target,
+                                    generator.randint(1, 9),
+                                )
+                            )
+            graph = self.make_graph(links)
+            expected: list[float] = []
+
+            def enumerate_paths(node: str, visited: set[str], cost: float) -> None:
+                if node == "t":
+                    expected.append(cost)
+                    return
+                for _, edge_source, edge_target, weight in links:
+                    if edge_source == node and edge_target not in visited:
+                        enumerate_paths(
+                            edge_target,
+                            visited | {edge_target},
+                            cost + weight,
+                        )
+
+            enumerate_paths("s", {"s"}, 0)
+            with self.subTest(case=case):
+                paths = graph.shortest_paths("s", "t", limit=20)
+                self.assertEqual(
+                    [path.total_weight for path in paths],
+                    sorted(expected)[:20],
+                )
+                identities = [
+                    tuple(edge.edge_id for edge in path.edges) for path in paths
+                ]
+                self.assertEqual(len(identities), len(set(identities)))
+                reversed_graph = AttackGraph(
+                    nodes=graph.nodes,
+                    edges=tuple(reversed(graph.edges)),
+                )
+                self.assertEqual(
+                    paths,
+                    reversed_graph.shortest_paths("s", "t", limit=20),
+                )
+
+    def test_resolves_ipv6_hosts_and_renders_ranked_evidence(self) -> None:
+        scan, cves = sample_documents()
+        graph = build_attack_graph(scan, cves)
+        target = graph.resolve_node("2001:0db8:0:0:0:0:0:10")
+        paths = graph.shortest_paths(ENTRY_NODE_ID, target)
+
+        self.assertEqual(target, "host:2001:db8::10")
+        self.assertEqual([path.total_weight for path in paths], [4.5, 7.0])
+        self.assertEqual(paths[0], graph.shortest_path(ENTRY_NODE_ID, target))
+        document = path_comparison_document(
+            ENTRY_NODE_ID,
+            target,
+            paths,
+            limit=3,
+        )
+        self.assertEqual([item["rank"] for item in document["paths"]], [1, 2])
+        self.assertEqual(
+            [item["cost_delta"] for item in document["paths"]],
+            [0.0, 2.5],
+        )
+        rendered = render_path_comparison_ascii(
+            graph,
+            ENTRY_NODE_ID,
+            target,
+            paths,
+        )
+        self.assertIn("+2.50", rendered)
+        self.assertIn("CVE-2024-6387 (medium)", rendered)
+        self.assertIn("CVE-2026-12345 (high)", rendered)
+        self.assertIn("Route 2", rendered)
+
+        target_list = render_host_targets_ascii(
+            ENTRY_NODE_ID,
+            [
+                {
+                    "id": target,
+                    "hostnames": ["server.lab"],
+                    "reachable": True,
+                    "cost": 4.5,
+                }
+            ],
+        )
+        self.assertIn("server.lab", target_list)
+        self.assertIn("cost=4.50", target_list)
+
+
 class BuilderTests(unittest.TestCase):
+    def test_builds_and_resolves_ipv4_host_path(self) -> None:
+        observed = evidence().to_dict()
+        service_id = "service:[192.0.2.10]:tcp:443"
+        graph = build_attack_graph(
+            {
+                "hosts": [
+                    {
+                        "id": "host:192.0.2.10",
+                        "address": "192.0.2.10",
+                        "hostnames": ["web.lab"],
+                        "evidence": [observed],
+                    }
+                ],
+                "services": [
+                    {
+                        "id": service_id,
+                        "host": "192.0.2.10",
+                        "port": 443,
+                        "protocol": "tcp",
+                        "state": "open",
+                        "name": "https",
+                        "product": "nginx",
+                        "version": "1.26",
+                        "cpes": [],
+                        "evidence": [observed],
+                    }
+                ],
+            },
+            {
+                "vulnerabilities": [
+                    {"id": "CVE-2026-45678", "cvss_score": 8.0}
+                ],
+                "matches": [
+                    {
+                        "service_id": service_id,
+                        "cve_id": "CVE-2026-45678",
+                        "confidence": "high",
+                        "reason": "Test candidate",
+                        "evidence": [observed],
+                    }
+                ],
+            },
+        )
+
+        target = graph.resolve_node("192.0.2.10")
+        path = graph.shortest_path(ENTRY_NODE_ID, target)
+
+        self.assertEqual(target, "host:192.0.2.10")
+        self.assertEqual(path.nodes[-1], target)
+        self.assertEqual(path.total_weight, 4.0)
+
     def test_builds_graph_and_selects_best_candidate_path(self) -> None:
         scan, cves = sample_documents()
 

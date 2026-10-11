@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 import heapq
+from ipaddress import ip_address
 import json
 import math
 from typing import Any
@@ -16,6 +17,14 @@ from hexpath.models import Confidence, Evidence, EvidenceLevel
 
 ENTRY_NODE_ID = "entry:scanner"
 DEFAULT_RENDER_MAX_DEPTH = 100
+NETWORK_SCORE_VERSION = "hexpath-network-v1"
+NETWORK_SCORE_COMPONENT_MAXIMUMS = {
+    "route_accessibility": 30.0,
+    "path_depth": 15.0,
+    "route_redundancy": 15.0,
+    "blast_radius": 15.0,
+    "exploit_evidence": 25.0,
+}
 
 
 class GraphError(ValueError):
@@ -133,6 +142,29 @@ class ShortestPath:
 
 
 @dataclass(frozen=True, slots=True)
+class HostExposureScore:
+    """A versioned network-exposure score for one reachable host path."""
+
+    target: str
+    network_score: float
+    components: dict[str, float]
+    observations: dict[str, Any]
+    path: ShortestPath
+    score_version: str = NETWORK_SCORE_VERSION
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "target": self.target,
+            "network_score": self.network_score,
+            "score_version": self.score_version,
+            "components": dict(self.components),
+            "component_maximums": dict(NETWORK_SCORE_COMPONENT_MAXIMUMS),
+            "observations": dict(self.observations),
+            "path": self.path.to_dict(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class AttackGraph:
     """A validated directed graph with evidence-backed weighted edges."""
 
@@ -170,6 +202,31 @@ class AttackGraph:
             + ", ".join(sorted(entries))
         )
 
+    def resolve_node(self, selector: str) -> str:
+        """Resolve an exact node identifier or an equivalent IP host address."""
+        if any(node.node_id == selector for node in self.nodes):
+            return selector
+        if not isinstance(selector, str):
+            raise GraphError(f"unknown node {selector!r}")
+        try:
+            address = ip_address(selector.removeprefix("host:"))
+        except ValueError:
+            raise GraphError(
+                f"unknown node {selector!r}; use 'hexpath graph targets' to list hosts"
+            ) from None
+        for node in self.nodes:
+            if node.kind is not NodeKind.HOST:
+                continue
+            try:
+                node_address = ip_address(node.node_id.removeprefix("host:"))
+            except ValueError:
+                continue
+            if node_address == address:
+                return node.node_id
+        raise GraphError(
+            f"unknown host {selector!r}; use 'hexpath graph targets' to list hosts"
+        )
+
     def shortest_path(
         self, source: str, target: str, *, algorithm: str = "dijkstra"
     ) -> ShortestPath | None:
@@ -186,9 +243,479 @@ class AttackGraph:
         if algorithm == "astar":
             return self._astar_path(source, target)
 
+        return self._dijkstra_path(source, target)
+
+    def ranked_host_paths(self, source: str) -> tuple[ShortestPath, ...]:
+        """Rank the least-cost Dijkstra path to every reachable host."""
+        node_ids = {node.node_id for node in self.nodes}
+        if source not in node_ids:
+            raise GraphError(f"unknown source node {source!r}")
+
+        distances, previous = self._dijkstra_search(source)
+        paths = [
+            _reconstruct_path(
+                source,
+                node.node_id,
+                previous,
+                distances[node.node_id],
+            )
+            for node in self.nodes
+            if node.kind is NodeKind.HOST
+            and node.node_id != source
+            and node.node_id in distances
+        ]
+        paths.sort(
+            key=lambda path: (
+                path.total_weight,
+                len(path.edges),
+                path.nodes[-1],
+            )
+        )
+        return tuple(paths)
+
+    def ranked_host_exposures(self, source: str) -> tuple[HostExposureScore, ...]:
+        """Score and rank every reachable host using the network-risk model."""
+        topology = self._topology()
+        scores = [
+            self._score_host_path(source, path, topology=topology)
+            for path in self.ranked_host_paths(source)
+        ]
+        scores.sort(
+            key=lambda score: (
+                -score.network_score,
+                score.path.total_weight,
+                len(score.path.edges),
+                score.target,
+            )
+        )
+        return tuple(scores)
+
+    def host_exposure(
+        self,
+        source: str,
+        target: str,
+    ) -> HostExposureScore | None:
+        """Score one host's selected Dijkstra path from a source node."""
+        nodes = {node.node_id: node for node in self.nodes}
+        if source not in nodes:
+            raise GraphError(f"unknown source node {source!r}")
+        if target not in nodes:
+            raise GraphError(f"unknown target node {target!r}")
+        if nodes[target].kind is not NodeKind.HOST:
+            raise GraphError("network exposure can only be scored for a host node")
+        if source == target:
+            raise GraphError("network exposure target must differ from the source")
+        path = self.shortest_path(source, target)
+        if path is None:
+            return None
+        topology = self._topology()
+        return self._score_host_path(source, path, topology=topology)
+
+    def _score_host_path(
+        self,
+        source: str,
+        path: ShortestPath,
+        *,
+        topology: tuple[
+            dict[str, tuple[str, ...]],
+            dict[str, tuple[str, ...]],
+            frozenset[str],
+        ]
+        | None = None,
+    ) -> HostExposureScore:
+        """Calculate transparent score components for a selected host path."""
+        target = path.nodes[-1]
+        adjacency, incoming, host_ids = topology or self._topology()
+
+        reachability_factors: list[float] = []
+        reachability_counts = {
+            "open": 0,
+            "uncertain": 0,
+            "filtered": 0,
+            "unknown": 0,
+        }
+        for edge in path.edges:
+            if edge.relationship != "observed_reachability":
+                continue
+            states = edge.metadata.get("service_states", [])
+            state_values = (
+                {str(state).lower() for state in states}
+                if isinstance(states, (list, tuple, set))
+                else set()
+            )
+            if "open" in state_values:
+                factor = 1.0
+                bucket = "open"
+            elif "open|filtered" in state_values:
+                factor = 0.5
+                bucket = "uncertain"
+            elif "filtered" in state_values:
+                factor = 0.25
+                bucket = "filtered"
+            else:
+                factor = 0.0
+                bucket = "unknown"
+            reachability_factors.append(factor)
+            reachability_counts[bucket] += 1
+
+        accessibility_factor = (
+            math.fsum(reachability_factors) / len(reachability_factors)
+            if reachability_factors
+            else 0.0
+        )
+
+        host_compromises = sum(
+            node_id in host_ids
+            for node_id in path.nodes
+            if node_id != source
+        )
+        depth_factor = 1.0 / host_compromises if host_compromises else 0.0
+
+        independent_routes = self._independent_route_count(
+            source,
+            target,
+            limit=4,
+            adjacency=adjacency,
+            incoming=incoming,
+        )
+        redundancy_factor = min(max(independent_routes - 1, 0), 3) / 3.0
+
+        eligible_blast_host_count = len(host_ids) - int(target in host_ids)
+        if source != target and source in host_ids:
+            eligible_blast_host_count -= 1
+        reachable_from_target = self._reachable_hosts(
+            target,
+            adjacency=adjacency,
+            host_ids=host_ids,
+        )
+        downstream_host_count = sum(
+            node_id != target and node_id != source
+            for node_id in reachable_from_target
+        )
+        blast_factor = (
+            downstream_host_count / eligible_blast_host_count
+            if eligible_blast_host_count
+            else 0.0
+        )
+
+        exploit_factors: list[float] = []
+        missing_cvss = 0
+        for edge in path.edges:
+            if not edge.metadata.get("cve_id"):
+                continue
+            raw_cvss = edge.metadata.get("cvss_score")
+            if (
+                isinstance(raw_cvss, bool)
+                or not isinstance(raw_cvss, (int, float))
+                or not math.isfinite(float(raw_cvss))
+                or not 0.0 <= float(raw_cvss) <= 10.0
+            ):
+                cvss_factor = 0.5
+                missing_cvss += 1
+            else:
+                cvss_factor = float(raw_cvss) / 10.0
+            confidence_factor = {
+                "high": 1.0,
+                "medium": 0.75,
+                "low": 0.5,
+            }.get(str(edge.metadata.get("confidence", "")).lower(), 0.25)
+            evidence_factor = max(
+                (
+                    {
+                        EvidenceLevel.VALIDATED: 1.0,
+                        EvidenceLevel.OBSERVED: 0.85,
+                        EvidenceLevel.INFERRED: 0.65,
+                    }[item.level]
+                    for item in edge.evidence
+                ),
+                default=0.0,
+            )
+            exploit_factors.append(
+                cvss_factor * confidence_factor * evidence_factor
+            )
+        exploit_factor = (
+            math.fsum(exploit_factors) / len(exploit_factors)
+            if exploit_factors
+            else 0.0
+        )
+
+        components = {
+            "route_accessibility": round(
+                NETWORK_SCORE_COMPONENT_MAXIMUMS["route_accessibility"]
+                * accessibility_factor,
+                2,
+            ),
+            "path_depth": round(
+                NETWORK_SCORE_COMPONENT_MAXIMUMS["path_depth"] * depth_factor,
+                2,
+            ),
+            "route_redundancy": round(
+                NETWORK_SCORE_COMPONENT_MAXIMUMS["route_redundancy"]
+                * redundancy_factor,
+                2,
+            ),
+            "blast_radius": round(
+                NETWORK_SCORE_COMPONENT_MAXIMUMS["blast_radius"] * blast_factor,
+                2,
+            ),
+            "exploit_evidence": round(
+                NETWORK_SCORE_COMPONENT_MAXIMUMS["exploit_evidence"]
+                * exploit_factor,
+                2,
+            ),
+        }
+        network_score = round(min(100.0, max(0.0, math.fsum(components.values()))), 2)
+        observations: dict[str, Any] = {
+            "reachability_edges": len(reachability_factors),
+            "reachability_states": reachability_counts,
+            "host_compromises": host_compromises,
+            "pivot_hosts": max(host_compromises - 1, 0),
+            "independent_routes": independent_routes,
+            "downstream_hosts": downstream_host_count,
+            "eligible_blast_hosts": eligible_blast_host_count,
+            "exploit_edges": len(exploit_factors),
+            "missing_cvss": missing_cvss,
+        }
+        return HostExposureScore(
+            target=target,
+            network_score=network_score,
+            components=components,
+            observations=observations,
+            path=path,
+        )
+
+    def _topology(
+        self,
+    ) -> tuple[
+        dict[str, tuple[str, ...]],
+        dict[str, tuple[str, ...]],
+        frozenset[str],
+    ]:
+        """Build reusable simple directed topology indexes for scoring."""
+        outgoing_sets = {node.node_id: set() for node in self.nodes}
+        incoming_sets = {node.node_id: set() for node in self.nodes}
+        for edge in self.edges:
+            outgoing_sets[edge.source].add(edge.target)
+            incoming_sets[edge.target].add(edge.source)
+        adjacency = {
+            node_id: tuple(sorted(targets))
+            for node_id, targets in outgoing_sets.items()
+        }
+        incoming = {
+            node_id: tuple(sorted(sources))
+            for node_id, sources in incoming_sets.items()
+        }
+        host_ids = frozenset(
+            node.node_id for node in self.nodes if node.kind is NodeKind.HOST
+        )
+        return adjacency, incoming, host_ids
+
+    def _reachable_hosts(
+        self,
+        source: str,
+        *,
+        adjacency: dict[str, tuple[str, ...]] | None = None,
+        host_ids: frozenset[str] | None = None,
+    ) -> set[str]:
+        """Return host nodes reachable from a node, excluding the source."""
+        if adjacency is None or host_ids is None:
+            adjacency, _, host_ids = self._topology()
+        if not adjacency[source]:
+            return set()
+        visited = {source}
+        pending = deque([source])
+        while pending:
+            node_id = pending.popleft()
+            for target in adjacency[node_id]:
+                if target not in visited:
+                    visited.add(target)
+                    pending.append(target)
+        return (visited & host_ids) - {source}
+
+    def _independent_route_count(
+        self,
+        source: str,
+        target: str,
+        *,
+        limit: int,
+        adjacency: dict[str, tuple[str, ...]] | None = None,
+        incoming: dict[str, tuple[str, ...]] | None = None,
+    ) -> int:
+        """Count internally vertex-disjoint routes with a bounded max-flow."""
+        if source == target:
+            return 1
+        if adjacency is None or incoming is None:
+            adjacency, incoming, _ = self._topology()
+        # The scored path proves at least one route exists. A single unique
+        # first or last transition makes a second internally disjoint route
+        # impossible, avoiding a max-flow construction for the common case.
+        if len(adjacency[source]) <= 1 or len(incoming[target]) <= 1:
+            return 1
+
+        # Split every graph node into an input and output vertex. Internal
+        # vertices have capacity one, while the endpoints allow up to ``limit``.
+        # Duplicate source/target pairs are collapsed so parallel CVE edges on
+        # one service do not masquerade as independent network routes.
+        residual: dict[tuple[str, str], dict[tuple[str, str], int]] = {}
+
+        def add_capacity(
+            start: tuple[str, str],
+            end: tuple[str, str],
+            capacity: int,
+        ) -> None:
+            residual.setdefault(start, {})[end] = capacity
+            residual.setdefault(end, {}).setdefault(start, 0)
+
+        for node in self.nodes:
+            capacity = limit if node.node_id in (source, target) else 1
+            add_capacity((node.node_id, "in"), (node.node_id, "out"), capacity)
+        for edge_source, edge_targets in adjacency.items():
+            for edge_target in edge_targets:
+                add_capacity((edge_source, "out"), (edge_target, "in"), 1)
+
+        start = (source, "in")
+        end = (target, "out")
+        flow = 0
+        while flow < limit:
+            previous: dict[tuple[str, str], tuple[str, str]] = {}
+            pending = deque([start])
+            seen = {start}
+            while pending and end not in seen:
+                vertex = pending.popleft()
+                for neighbor in sorted(residual.get(vertex, {})):
+                    if residual[vertex][neighbor] > 0 and neighbor not in seen:
+                        seen.add(neighbor)
+                        previous[neighbor] = vertex
+                        pending.append(neighbor)
+            if end not in seen:
+                break
+            current = end
+            while current != start:
+                predecessor = previous[current]
+                residual[predecessor][current] -= 1
+                residual[current][predecessor] += 1
+                current = predecessor
+            flow += 1
+        return flow
+
+    def shortest_paths(
+        self,
+        source: str,
+        target: str,
+        *,
+        limit: int = 3,
+    ) -> tuple[ShortestPath, ...]:
+        """Return the cheapest loop-free paths using Yen's algorithm.
+
+        Edge identities keep parallel transitions, such as alternative CVEs on
+        one service, as distinct routes. Dijkstra is used for each spur search.
+        """
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
+            raise GraphError("path limit must be an integer between 1 and 20")
+
+        first = self._dijkstra_path(source, target)
+        if first is None:
+            return ()
+
+        selected = [first]
+        candidates: list[tuple[float, tuple[str, ...], ShortestPath]] = []
+        seen = {tuple(edge.edge_id for edge in first.edges)}
+
+        while len(selected) < limit:
+            previous = selected[-1]
+            for index, spur_node in enumerate(previous.nodes[:-1]):
+                root_edges = previous.edges[:index]
+                root_edge_ids = tuple(edge.edge_id for edge in root_edges)
+                excluded_edges = {
+                    path.edges[index].edge_id
+                    for path in selected
+                    if len(path.edges) > index
+                    and tuple(edge.edge_id for edge in path.edges[:index])
+                    == root_edge_ids
+                }
+                spur = self._dijkstra_path(
+                    spur_node,
+                    target,
+                    excluded_nodes=frozenset(previous.nodes[:index]),
+                    excluded_edges=frozenset(excluded_edges),
+                )
+                if spur is None:
+                    continue
+
+                edges = root_edges + spur.edges
+                identity = tuple(edge.edge_id for edge in edges)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                weight = math.fsum(edge.weight for edge in edges)
+                candidate = ShortestPath(
+                    nodes=previous.nodes[:index] + spur.nodes,
+                    edges=edges,
+                    total_weight=round(weight, 4),
+                )
+                heapq.heappush(candidates, (weight, identity, candidate))
+
+            if not candidates:
+                break
+            selected.append(heapq.heappop(candidates)[2])
+
+        return tuple(selected)
+
+    def _dijkstra_path(
+        self,
+        source: str,
+        target: str,
+        *,
+        excluded_nodes: frozenset[str] = frozenset(),
+        excluded_edges: frozenset[str] = frozenset(),
+    ) -> ShortestPath | None:
+        """Return one cheapest path while optionally excluding graph elements."""
+        node_ids = {node.node_id for node in self.nodes}
+        if source not in node_ids:
+            raise GraphError(f"unknown source node {source!r}")
+        if target not in node_ids:
+            raise GraphError(f"unknown target node {target!r}")
+        if source in excluded_nodes or target in excluded_nodes:
+            return None
+        if source == target:
+            return ShortestPath(nodes=(source,), edges=(), total_weight=0.0)
+
+        distances, previous = self._dijkstra_search(
+            source,
+            target=target,
+            excluded_nodes=excluded_nodes,
+            excluded_edges=excluded_edges,
+        )
+        if target not in distances:
+            return None
+
+        return _reconstruct_path(source, target, previous, distances[target])
+
+    def _dijkstra_search(
+        self,
+        source: str,
+        *,
+        target: str | None = None,
+        excluded_nodes: frozenset[str] = frozenset(),
+        excluded_edges: frozenset[str] = frozenset(),
+    ) -> tuple[dict[str, float], dict[str, GraphEdge]]:
+        """Run Dijkstra once, optionally stopping at a selected target."""
+        node_ids = {node.node_id for node in self.nodes}
+        if source not in node_ids:
+            raise GraphError(f"unknown source node {source!r}")
+        if source in excluded_nodes:
+            return {}, {}
+
         adjacency: dict[str, list[GraphEdge]] = {node_id: [] for node_id in node_ids}
         for edge in self.edges:
-            adjacency[edge.source].append(edge)
+            if (
+                edge.edge_id not in excluded_edges
+                and edge.source not in excluded_nodes
+                and edge.target not in excluded_nodes
+            ):
+                adjacency[edge.source].append(edge)
+        for outgoing in adjacency.values():
+            outgoing.sort(key=lambda edge: edge.edge_id)
 
         distances = {source: 0.0}
         previous: dict[str, GraphEdge] = {}
@@ -197,7 +724,7 @@ class AttackGraph:
             distance, node_id = heapq.heappop(queue)
             if distance != distances.get(node_id):
                 continue
-            if node_id == target:
+            if target is not None and node_id == target:
                 break
             for edge in adjacency[node_id]:
                 candidate = distance + edge.weight
@@ -206,10 +733,7 @@ class AttackGraph:
                     previous[edge.target] = edge
                     heapq.heappush(queue, (candidate, edge.target))
 
-        if target not in distances:
-            return None
-
-        return _reconstruct_path(source, target, previous, distances[target])
+        return distances, previous
 
     def _astar_path(self, source: str, target: str) -> ShortestPath | None:
         """Search with h(node) = minimum hops to target * minimum edge cost.
@@ -665,6 +1189,386 @@ def render_path_ascii(graph: AttackGraph, path: ShortestPath) -> str:
     lines.append("")
     lines.append(f"Total cost: {path.total_weight:.2f}")
     return "\n".join(lines)
+
+
+def render_host_targets_ascii(source: str, targets: list[dict[str, Any]]) -> str:
+    """Show host selectors, names, and modeled costs with safe terminal text."""
+    lines = ["HexPath Host Targets", f"Source: {_terminal_text(source)}"]
+    for item in targets:
+        status = f"cost={item['cost']:.2f}" if item["reachable"] else "no modeled path"
+        hostnames = item.get("hostnames", [])
+        names = (
+            ", ".join(
+                _terminal_text(name) for name in hostnames if isinstance(name, str)
+            )
+            if isinstance(hostnames, list)
+            else ""
+        )
+        suffix = f" | {names}" if names else ""
+        lines.append(f"  {_terminal_text(item['id'])} | {status}{suffix}")
+    if not targets:
+        lines.append("No host targets in this graph.")
+    lines.append("Reachability here requires evidence-backed graph transitions.")
+    return "\n".join(lines)
+
+
+def path_comparison_document(
+    source: str,
+    target: str,
+    paths: tuple[ShortestPath, ...],
+    *,
+    limit: int,
+) -> dict[str, Any]:
+    """Serialize ranked routes while retaining every edge's evidence."""
+    best_cost = paths[0].total_weight if paths else 0.0
+    return {
+        "source": source,
+        "target": target,
+        "requested_paths": limit,
+        "paths": [
+            {
+                **path.to_dict(),
+                "rank": rank,
+                "cost_delta": round(path.total_weight - best_cost, 4),
+            }
+            for rank, path in enumerate(paths, 1)
+        ],
+    }
+
+
+def render_path_comparison_ascii(
+    graph: AttackGraph,
+    source: str,
+    target: str,
+    paths: tuple[ShortestPath, ...],
+) -> str:
+    """Compare route cost, candidate CVEs, confidence, and transitions."""
+    lines = ["HexPath Path Comparison", "======================="]
+    lines.append(f"Source: {_terminal_text(source)}")
+    lines.append(f"Target: {_terminal_text(target)}")
+    if not paths:
+        lines.append("No evidence-backed directed path in this graph.")
+        return "\n".join(lines)
+
+    lines.extend(["", "Rank  Cost     Delta    Candidate findings"])
+    for rank, path in enumerate(paths, 1):
+        findings = _path_findings(path)
+        delta = path.total_weight - paths[0].total_weight
+        lines.append(f"{rank:<4}  {path.total_weight:<7.2f}  +{delta:<7.2f} {findings}")
+
+    for rank, path in enumerate(paths, 1):
+        lines.append("")
+        rendered = render_path_ascii(graph, path).splitlines()
+        lines.extend([f"Route {rank}", *rendered[2:]])
+    lines.extend(
+        [
+            "",
+            "Costs rank investigation routes; candidate CVEs do not confirm exploitation.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def graph_validation_document(graph: AttackGraph) -> dict[str, Any]:
+    """Summarize a graph that passed structural and evidence validation."""
+    node_kinds = {
+        kind.value: sum(node.kind is kind for node in graph.nodes)
+        for kind in NodeKind
+    }
+    relationship_counts: dict[str, int] = {}
+    for edge in graph.edges:
+        relationship_counts[edge.relationship] = (
+            relationship_counts.get(edge.relationship, 0) + 1
+        )
+    return {
+        "valid": True,
+        "nodes": len(graph.nodes),
+        "edges": len(graph.edges),
+        "node_kinds": node_kinds,
+        "relationships": dict(sorted(relationship_counts.items())),
+        "entry_nodes": sorted(
+            node.node_id for node in graph.nodes if node.kind is NodeKind.ENTRY
+        ),
+    }
+
+
+def render_graph_validation_ascii(graph: AttackGraph) -> str:
+    """Render a concise validation summary for one saved graph."""
+    document = graph_validation_document(graph)
+    kinds = document["node_kinds"]
+    entries = document["entry_nodes"]
+    lines = [
+        "HexPath Graph Validation",
+        "========================",
+        "Status: valid",
+        f"Nodes: {document['nodes']}  Edges: {document['edges']}",
+        (
+            f"Kinds: entry={kinds['entry']}  host={kinds['host']}  "
+            f"service={kinds['service']}"
+        ),
+        "Entry nodes: " + (", ".join(entries) if entries else "none"),
+    ]
+    relationships = document["relationships"]
+    if relationships:
+        lines.append(
+            "Relationships: "
+            + ", ".join(
+                f"{relationship}={count}"
+                for relationship, count in relationships.items()
+            )
+        )
+    else:
+        lines.append("Relationships: none")
+    return "\n".join(lines)
+
+
+def host_exposure_document(
+    graph: AttackGraph,
+    source: str,
+    score: HostExposureScore,
+) -> dict[str, Any]:
+    """Serialize one host's exposure score and retained path evidence."""
+    nodes = {node.node_id: node for node in graph.nodes}
+    entry = _ranked_host_path_entry(nodes, score, rank=1)
+    entry.pop("rank")
+    return {
+        "algorithm": "dijkstra",
+        "source": source,
+        "score_interpretation": (
+            "higher scores indicate greater modeled network exposure; "
+            "this is not a CVSS score or proof of exploitability"
+        ),
+        **entry,
+    }
+
+
+def render_host_exposure_ascii(
+    graph: AttackGraph,
+    source: str,
+    score: HostExposureScore,
+) -> str:
+    """Render one selected host's exposure score and component breakdown."""
+    nodes = {node.node_id: node for node in graph.nodes}
+    target = nodes[score.target]
+    lines = [
+        "HexPath Host Exposure Score",
+        "===========================",
+        f"Source: {_terminal_text(source)}",
+        f"Target: {_terminal_text(target.node_id)}",
+        f"Network score: {score.network_score:.2f}/100",
+        f"Score model: {score.score_version}",
+        "",
+        "Components",
+        "----------",
+    ]
+    lines.extend(
+        f"{name}: {value:.2f}/{NETWORK_SCORE_COMPONENT_MAXIMUMS[name]:.0f}"
+        for name, value in score.components.items()
+    )
+    lines.extend(
+        [
+            "",
+            "Selected route",
+            "--------------",
+            *render_path_ascii(graph, score.path).splitlines()[2:],
+            "",
+            "Observations: "
+            f"routes={score.observations['independent_routes']}, "
+            f"pivots={score.observations['pivot_hosts']}, "
+            f"downstream_hosts={score.observations['downstream_hosts']}, "
+            f"exploit_edges={score.observations['exploit_edges']}",
+            "Scores prioritize investigation; they do not prove exploitability or impact.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def vulnerable_path_ranking_document(
+    graph: AttackGraph,
+    source: str,
+    scores: tuple[HostExposureScore | ShortestPath, ...],
+    *,
+    limit: int,
+) -> dict[str, Any]:
+    """Serialize network exposure scores and their selected Dijkstra paths."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
+        raise GraphError("path limit must be an integer between 1 and 20")
+
+    exposures = _normalized_exposure_scores(graph, source, scores)
+    nodes = {node.node_id: node for node in graph.nodes}
+    reported = exposures[:limit]
+    reachable_targets = {score.target for score in exposures}
+    unreachable = [
+        {
+            **node.to_dict(),
+            "network_score": None,
+            "reason": "no evidence-backed directed path from the selected source",
+        }
+        for node in sorted(graph.nodes, key=lambda item: item.node_id)
+        if node.kind is NodeKind.HOST
+        and node.node_id != source
+        and node.node_id not in reachable_targets
+    ]
+    entries = [
+        _ranked_host_path_entry(nodes, score, rank)
+        for rank, score in enumerate(reported, 1)
+    ]
+    return {
+        "algorithm": "dijkstra",
+        "source": source,
+        "ranking": "network_score_descending",
+        "score_version": NETWORK_SCORE_VERSION,
+        "score_interpretation": (
+            "higher scores indicate greater modeled network exposure; "
+            "this is not a CVSS score or proof of exploitability"
+        ),
+        "component_maximums": dict(NETWORK_SCORE_COMPONENT_MAXIMUMS),
+        "path_cost_interpretation": (
+            "lower Dijkstra cost identifies the selected evidence-backed route"
+        ),
+        "analyzed_hosts": len(reachable_targets) + len(unreachable),
+        "reachable_hosts": len(reachable_targets),
+        "reported_paths": len(entries),
+        "most_vulnerable_path": entries[0] if entries else None,
+        "alternative_paths": entries[1:],
+        "unreachable_hosts": unreachable,
+    }
+
+
+def render_vulnerable_path_ranking_ascii(
+    graph: AttackGraph,
+    source: str,
+    scores: tuple[HostExposureScore | ShortestPath, ...],
+    *,
+    limit: int,
+) -> str:
+    """Render network-wide exposure scores and Dijkstra paths."""
+    exposures = _normalized_exposure_scores(graph, source, scores)
+    document = vulnerable_path_ranking_document(
+        graph,
+        source,
+        exposures,
+        limit=limit,
+    )
+    lines = [
+        "HexPath Network Exposure Ranking",
+        "================================",
+        f"Source: {_terminal_text(source)}",
+    ]
+    if not exposures:
+        lines.append("No evidence-backed directed path reaches another host.")
+        lines.append(f"Hosts analyzed: {document['analyzed_hosts']}  Reachable: 0")
+        return "\n".join(lines)
+
+    nodes = {node.node_id: node for node in graph.nodes}
+    reported = exposures[:limit]
+    lines.extend(
+        [
+            "Higher score indicates greater modeled exposure (0-100).",
+            "",
+            "Rank  Score   Cost     Target                         Candidate findings",
+        ]
+    )
+    for rank, score in enumerate(reported, 1):
+        target = nodes[score.target]
+        findings = _path_findings(score.path)
+        lines.append(
+            f"{rank:<4}  {score.network_score:<6.2f}  "
+            f"{score.path.total_weight:<7.2f}  "
+            f"{_terminal_text(target.node_id):<29}  {findings}"
+        )
+
+    best = reported[0]
+    lines.extend(["", "Highest-exposure route", "----------------------"])
+    rendered = render_path_ascii(graph, best.path).splitlines()
+    lines.extend(rendered[2:])
+    lines.append("")
+    lines.append(
+        "Score components: "
+        + ", ".join(
+            f"{name}={value:.2f}/{NETWORK_SCORE_COMPONENT_MAXIMUMS[name]:.0f}"
+            for name, value in best.components.items()
+        )
+    )
+    lines.append(
+        "Observations: "
+        f"routes={best.observations['independent_routes']}, "
+        f"pivots={best.observations['pivot_hosts']}, "
+        f"downstream_hosts={best.observations['downstream_hosts']}, "
+        f"exploit_edges={best.observations['exploit_edges']}"
+    )
+    lines.extend(
+        [
+            "",
+            f"Hosts analyzed: {document['analyzed_hosts']}  "
+            f"Reachable: {document['reachable_hosts']}  "
+            f"Shown: {document['reported_paths']}",
+            f"Score model: {NETWORK_SCORE_VERSION}",
+            "Scores prioritize investigation; they do not prove exploitability or impact.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _ranked_host_path_entry(
+    nodes: dict[str, GraphNode],
+    score: HostExposureScore,
+    rank: int,
+) -> dict[str, Any]:
+    target = nodes[score.target]
+    return {
+        "rank": rank,
+        "network_score": score.network_score,
+        "score_version": score.score_version,
+        "components": dict(score.components),
+        "component_maximums": dict(NETWORK_SCORE_COMPONENT_MAXIMUMS),
+        "observations": dict(score.observations),
+        "target": target.to_dict(),
+        "candidate_findings": [
+            {
+                "cve_id": edge.metadata["cve_id"],
+                "confidence": edge.metadata.get("confidence"),
+                "cvss_score": edge.metadata.get("cvss_score"),
+            }
+            for edge in score.path.edges
+            if edge.metadata.get("cve_id")
+        ],
+        "path": score.path.to_dict(),
+    }
+
+
+def _normalized_exposure_scores(
+    graph: AttackGraph,
+    source: str,
+    values: tuple[HostExposureScore | ShortestPath, ...],
+) -> tuple[HostExposureScore, ...]:
+    """Accept legacy path tuples while keeping score-ranked public output."""
+    topology = graph._topology()
+    exposures = [
+        value
+        if isinstance(value, HostExposureScore)
+        else graph._score_host_path(source, value, topology=topology)
+        for value in values
+    ]
+    exposures.sort(
+        key=lambda score: (
+            -score.network_score,
+            score.path.total_weight,
+            len(score.path.edges),
+            score.target,
+        )
+    )
+    return tuple(exposures)
+
+
+def _path_findings(path: ShortestPath) -> str:
+    findings = "; ".join(
+        f"{_terminal_text(str(edge.metadata['cve_id']))} "
+        f"({_terminal_text(str(edge.metadata.get('confidence', 'unknown')))})"
+        for edge in path.edges
+        if edge.metadata.get("cve_id")
+    )
+    return findings or "No candidate CVE transitions"
 
 
 def _ascii_node(node: GraphNode) -> str:

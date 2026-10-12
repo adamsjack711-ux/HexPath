@@ -14,6 +14,11 @@ from hexpath.models import Confidence, Evidence, EvidenceLevel
 
 
 ENTRY_NODE_ID = "entry:scanner"
+# Real edge costs are tiny (reachability <= 3, vulnerability_cost <= 14). This
+# generous ceiling keeps malformed graph files from producing edge weights that
+# overflow to infinity when Dijkstra sums them, which would make a reachable
+# target look unreachable.
+MAX_EDGE_WEIGHT = 1_000_000.0
 DEFAULT_RENDER_MAX_DEPTH = 100
 
 
@@ -90,6 +95,10 @@ class GraphEdge:
         weight = float(self.weight)
         if not math.isfinite(weight) or weight <= 0:
             raise GraphError("edge weight must be finite and greater than zero")
+        if weight > MAX_EDGE_WEIGHT:
+            raise GraphError(
+                f"edge weight must not exceed {MAX_EDGE_WEIGHT:g}"
+            )
         object.__setattr__(self, "weight", weight)
         evidence = tuple(self.evidence)
         if not evidence:

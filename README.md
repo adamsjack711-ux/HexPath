@@ -165,7 +165,9 @@ python -m unittest discover --start-directory tests --verbose
 1. Make sure you’ve accepted your GitHub collaborator invitation so you can contribute directly.
 2. Use [Issues](https://github.com/adamsjack711-ux/HexPath/issues) to propose ideas, track tasks, and report problems. Add enough context for a teammate to pick up the work.
 3. Work on a separate branch and open a pull request into the default branch. Ask a teammate to review it before merging.
-4. Keep this README updated as we agree on the scope and how to run the tool.
+4. Use the [group roadmap](ROADMAP.md) to coordinate integration, validation,
+   and release work.
+5. Keep this README updated as we agree on the scope and how to run the tool.
 
 ## Next milestone
 

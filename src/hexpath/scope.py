@@ -1,15 +1,25 @@
-"""Authorized IPv6 target scope loading and validation."""
+"""Authorized IPv4 and IPv6 target scope loading and validation."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from ipaddress import IPv6Address, IPv6Network, ip_address, ip_network
+from ipaddress import (
+    IPv4Address,
+    IPv4Network,
+    IPv6Address,
+    IPv6Network,
+    ip_address,
+    ip_network,
+)
 import json
 from pathlib import Path
 from typing import Any
 
 
 DEFAULT_MINIMUM_PREFIX_LENGTH = 48
+DEFAULT_MINIMUM_IPV4_PREFIX_LENGTH = 24
+IPAddress = IPv4Address | IPv6Address
+IPNetwork = IPv4Network | IPv6Network
 
 
 class ScopeError(ValueError):
@@ -21,7 +31,7 @@ class TargetOutsideScopeError(ScopeError):
 
 
 def _reject_unsafe_network(
-    network: IPv6Network,
+    network: IPNetwork,
     raw_target: str,
     minimum_prefix_length: int,
 ) -> None:
@@ -49,8 +59,8 @@ def _reject_unsafe_network(
         category = "the unspecified address"
     elif network.is_link_local:
         category = "a link-local range"
-    elif address.ipv4_mapped is not None:
-        category = "an IPv4-mapped range (HexPath assesses IPv6 only)"
+    elif isinstance(address, IPv6Address) and address.ipv4_mapped is not None:
+        category = "an IPv4-mapped range"
     else:
         return
     raise ScopeError(
@@ -60,10 +70,10 @@ def _reject_unsafe_network(
 
 @dataclass(frozen=True, slots=True)
 class Scope:
-    """A named collection of explicitly authorized IPv6 networks."""
+    """A named collection of explicitly authorized IP networks."""
 
     name: str
-    networks: tuple[IPv6Network, ...]
+    networks: tuple[IPNetwork, ...]
 
     @classmethod
     def from_dict(
@@ -71,6 +81,7 @@ class Scope:
         data: dict[str, Any],
         *,
         minimum_prefix_length: int = DEFAULT_MINIMUM_PREFIX_LENGTH,
+        minimum_ipv4_prefix_length: int = DEFAULT_MINIMUM_IPV4_PREFIX_LENGTH,
     ) -> Scope:
         """Create a scope from decoded JSON data."""
         if (
@@ -79,6 +90,14 @@ class Scope:
             or not 0 <= minimum_prefix_length <= 128
         ):
             raise ScopeError("minimum_prefix_length must be an integer between 0 and 128")
+        if (
+            isinstance(minimum_ipv4_prefix_length, bool)
+            or not isinstance(minimum_ipv4_prefix_length, int)
+            or not 0 <= minimum_ipv4_prefix_length <= 32
+        ):
+            raise ScopeError(
+                "minimum_ipv4_prefix_length must be an integer between 0 and 32"
+            )
 
         name = data.get("name")
         targets = data.get("targets")
@@ -88,7 +107,7 @@ class Scope:
         if not isinstance(targets, list) or not targets:
             raise ScopeError("scope 'targets' must be a non-empty list")
 
-        networks: list[IPv6Network] = []
+        networks: list[IPNetwork] = []
         for raw_target in targets:
             if not isinstance(raw_target, str):
                 raise ScopeError("every scope target must be a string")
@@ -98,10 +117,12 @@ class Scope:
             except ValueError as error:
                 raise ScopeError(f"invalid scope target {raw_target!r}: {error}") from error
 
-            if not isinstance(network, IPv6Network):
-                raise ScopeError(f"IPv4 target {raw_target!r} is not supported")
-
-            _reject_unsafe_network(network, raw_target, minimum_prefix_length)
+            family_minimum = (
+                minimum_ipv4_prefix_length
+                if isinstance(network, IPv4Network)
+                else minimum_prefix_length
+            )
+            _reject_unsafe_network(network, raw_target, family_minimum)
             networks.append(network)
 
         return cls(name=name.strip(), networks=tuple(networks))
@@ -112,6 +133,7 @@ class Scope:
         path: str | Path,
         *,
         minimum_prefix_length: int = DEFAULT_MINIMUM_PREFIX_LENGTH,
+        minimum_ipv4_prefix_length: int = DEFAULT_MINIMUM_IPV4_PREFIX_LENGTH,
     ) -> Scope:
         """Load and validate a scope from a JSON file."""
         scope_path = Path(path)
@@ -127,36 +149,40 @@ class Scope:
         if not isinstance(data, dict):
             raise ScopeError("scope file must contain a JSON object")
 
-        return cls.from_dict(data, minimum_prefix_length=minimum_prefix_length)
+        return cls.from_dict(
+            data,
+            minimum_prefix_length=minimum_prefix_length,
+            minimum_ipv4_prefix_length=minimum_ipv4_prefix_length,
+        )
 
-    def require_authorized(self, target: str) -> IPv6Address:
+    def require_authorized(self, target: str) -> IPAddress:
         """Return a parsed target or raise if it is invalid or unauthorized."""
         try:
             address = ip_address(target)
         except ValueError as error:
             raise ScopeError(f"invalid IP address {target!r}") from error
 
-        if not isinstance(address, IPv6Address):
-            raise ScopeError(f"IPv4 target {target!r} is not supported")
-
-        if not any(address in network for network in self.networks):
+        if not any(
+            address.version == network.version and address in network
+            for network in self.networks
+        ):
             raise TargetOutsideScopeError(
                 f"target {address} is outside authorized scope {self.name!r}"
             )
 
         return address
 
-    def require_authorized_network(self, target: str) -> IPv6Network:
-        """Return an IPv6 target network if it is contained by the scope."""
+    def require_authorized_network(self, target: str) -> IPNetwork:
+        """Return an IP target network if it is contained by the scope."""
         try:
             network = ip_network(target, strict=True)
         except ValueError as error:
             raise ScopeError(f"invalid target network {target!r}: {error}") from error
 
-        if not isinstance(network, IPv6Network):
-            raise ScopeError(f"IPv4 target {target!r} is not supported")
-
-        if not any(network.subnet_of(allowed) for allowed in self.networks):
+        if not any(
+            network.version == allowed.version and network.subnet_of(allowed)
+            for allowed in self.networks
+        ):
             raise TargetOutsideScopeError(
                 f"target {network} is outside authorized scope {self.name!r}"
             )

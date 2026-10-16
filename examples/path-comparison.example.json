@@ -1,0 +1,46 @@
+{
+  "nodes": [
+    {"id": "entry:scanner", "kind": "entry", "label": "Synthetic entry"},
+    {"id": "host:a", "kind": "host", "label": "Synthetic pivot A"},
+    {"id": "host:b", "kind": "host", "label": "Synthetic pivot B"},
+    {"id": "host:target", "kind": "host", "label": "Synthetic target"}
+  ],
+  "edges": [
+    {
+      "id": "direct",
+      "source": "entry:scanner",
+      "target": "host:target",
+      "relationship": "synthetic_transition",
+      "weight": 10,
+      "description": "Expensive direct route",
+      "evidence": [{"source": "example", "summary": "Synthetic demonstration only", "level": "inferred", "collected_at": "2026-10-09T00:00:00+00:00", "reference": null}]
+    },
+    {
+      "id": "entry-a",
+      "source": "entry:scanner",
+      "target": "host:a",
+      "relationship": "synthetic_transition",
+      "weight": 1,
+      "description": "First step of the cheaper route",
+      "evidence": [{"source": "example", "summary": "Synthetic demonstration only", "level": "inferred", "collected_at": "2026-10-09T00:00:00+00:00", "reference": null}]
+    },
+    {
+      "id": "a-b",
+      "source": "host:a",
+      "target": "host:b",
+      "relationship": "synthetic_transition",
+      "weight": 1,
+      "description": "Second step of the cheaper route",
+      "evidence": [{"source": "example", "summary": "Synthetic demonstration only", "level": "inferred", "collected_at": "2026-10-09T00:00:00+00:00", "reference": null}]
+    },
+    {
+      "id": "b-target",
+      "source": "host:b",
+      "target": "host:target",
+      "relationship": "synthetic_transition",
+      "weight": 1,
+      "description": "Final step of the cheaper route",
+      "evidence": [{"source": "example", "summary": "Synthetic demonstration only", "level": "inferred", "collected_at": "2026-10-09T00:00:00+00:00", "reference": null}]
+    }
+  ]
+}

@@ -19,6 +19,8 @@ from hexpath.scanner import (
     parse_nmap_xml,
     require_authorized_vantage,
     run_nmap,
+    scan_levels_document,
+    scan_profile_for_level,
 )
 from hexpath.scope import Scope, TargetOutsideScopeError
 
@@ -63,6 +65,148 @@ class NmapCommandTests(unittest.TestCase):
         self.assertEqual(command.targets, ("2001:db8:1::/80",))
         self.assertIn("--version-light", command.arguments)
 
+    def test_can_skip_discovery_for_filtered_targets(self) -> None:
+        command = build_nmap_command(
+            self.scope,
+            ["2001:db8:1::10"],
+            ScanProfile.SERVICES,
+            skip_discovery=True,
+        )
+
+        self.assertIn("-Pn", command.arguments)
+        self.assertIn("-sV", command.arguments)
+
+    def test_accepts_numeric_service_port_selection(self) -> None:
+        command = build_nmap_command(
+            self.scope,
+            ["2001:db8:1::10"],
+            ScanProfile.SERVICES,
+            ports="22,80,443,8000-8100",
+        )
+
+        port_index = command.arguments.index("-p")
+        self.assertEqual(command.arguments[port_index + 1], "22,80,443,8000-8100")
+
+    def test_rejects_custom_ports_for_fixed_scan_profiles(self) -> None:
+        for profile in (
+            ScanProfile.DISCOVERY,
+            ScanProfile.QUICK,
+            ScanProfile.FULL,
+            ScanProfile.DEEP,
+        ):
+            with self.subTest(profile=profile), self.assertRaisesRegex(
+                ScannerError,
+                "services profile",
+            ):
+                build_nmap_command(
+                    self.scope,
+                    ["2001:db8:1::10"],
+                    profile,
+                    ports="22",
+                )
+
+    def test_rejects_invalid_port_selection(self) -> None:
+        cases = (
+            ("--script=unsafe", "numbers or ranges"),
+            ("22-", "invalid port range"),
+            ("22--80", "invalid port range"),
+            ("22,,80", "empty entries"),
+            ("0", "between 1 and 65535"),
+            ("65536", "between 1 and 65535"),
+            ("443-80", "descending"),
+        )
+        for ports, message in cases:
+            with self.subTest(ports=ports), self.assertRaisesRegex(
+                ScannerError,
+                message,
+            ):
+                build_nmap_command(
+                    self.scope,
+                    ["2001:db8:1::10"],
+                    ScanProfile.SERVICES,
+                    ports=ports,
+                )
+
+    def test_information_levels_map_to_fixed_scan_profiles(self) -> None:
+        expected = {
+            0: (ScanProfile.DISCOVERY, ("-sn",)),
+            1: (ScanProfile.QUICK, ("-sT", "--top-ports", "100")),
+            2: (ScanProfile.SERVICES, ("-sT", "-sV", "--version-light")),
+            3: (ScanProfile.FULL, ("-sT", "-sV", "--version-light", "-p-")),
+            4: (ScanProfile.DEEP, ("-sT", "-sV", "--version-all", "-p-")),
+        }
+
+        for level, (profile, profile_arguments) in expected.items():
+            with self.subTest(level=level):
+                resolved = scan_profile_for_level(level)
+                command = build_nmap_command(
+                    self.scope,
+                    ["2001:db8:1::10"],
+                    resolved,
+                )
+                self.assertEqual(resolved, profile)
+                self.assertEqual(
+                    command.arguments[6:-1],
+                    profile_arguments,
+                )
+
+    def test_scan_level_catalog_and_validation(self) -> None:
+        document = scan_levels_document()
+
+        self.assertEqual(
+            [item["level"] for item in document["levels"]],
+            [0, 1, 2, 3, 4],
+        )
+        self.assertEqual(document["levels"][0]["wait"], "fastest")
+        self.assertEqual(document["levels"][-1]["wait"], "longest")
+        for invalid in (-1, 5, True, "2"):
+            with self.subTest(invalid=invalid), self.assertRaises(ScannerError):
+                scan_profile_for_level(invalid)
+
+    def test_builds_ipv4_command_without_ipv6_switch(self) -> None:
+        scope = Scope.from_dict(
+            {"name": "IPv4 lab", "targets": ["192.0.2.0/24"]}
+        )
+
+        command = build_nmap_command(
+            scope,
+            ["192.0.2.10"],
+            ScanProfile.DISCOVERY,
+        )
+
+        self.assertEqual(command.targets, ("192.0.2.10/32",))
+        self.assertEqual(command.ip_version, 4)
+        self.assertNotIn("-6", command.arguments)
+        self.assertEqual(command.arguments[-2:], ("-sn", "192.0.2.10/32"))
+
+    def test_rejects_mixed_address_families_in_one_scan(self) -> None:
+        scope = Scope.from_dict(
+            {
+                "name": "dual-stack lab",
+                "targets": ["192.0.2.0/24", "2001:db8:1::/64"],
+            }
+        )
+
+        with self.assertRaisesRegex(ScannerError, "cannot mix IPv4 and IPv6"):
+            build_nmap_command(
+                scope,
+                ["192.0.2.10", "2001:db8:1::10"],
+                ScanProfile.DISCOVERY,
+            )
+
+    def test_rejects_explicit_address_family_mismatch(self) -> None:
+        scope = Scope.from_dict(
+            {"name": "IPv4 lab", "targets": ["192.0.2.0/24"]}
+        )
+
+        with self.assertRaisesRegex(ScannerError, "requested IPv6"):
+            build_nmap_command(
+                scope,
+                ["192.0.2.10"],
+                ScanProfile.DISCOVERY,
+                ip_version=6,
+            )
+
     def test_rejects_target_that_is_broader_than_scope(self) -> None:
         with self.assertRaises(TargetOutsideScopeError):
             build_nmap_command(
@@ -82,6 +226,15 @@ class NmapCommandTests(unittest.TestCase):
     def test_rejects_out_of_scope_scan_vantage(self) -> None:
         with self.assertRaisesRegex(ScannerError, "invalid scan vantage"):
             require_authorized_vantage(self.scope, "host:2001:db8:2::10")
+
+    def test_accepts_authorized_ipv4_scan_vantage(self) -> None:
+        scope = Scope.from_dict(
+            {"name": "IPv4 lab", "targets": ["192.0.2.0/24"]}
+        )
+
+        vantage = require_authorized_vantage(scope, "host:192.0.2.10")
+
+        self.assertEqual(vantage, "host:192.0.2.10")
 
 
 class NmapRunnerTests(unittest.TestCase):
@@ -159,6 +312,39 @@ class NmapXmlParserTests(unittest.TestCase):
         self.assertEqual(document["vantage"], "entry:scanner")
         self.assertEqual(document["hosts"][0]["hostnames"], ["server.lab"])
         self.assertEqual(document["services"][0]["protocol"], "tcp")
+
+    def test_parses_ipv4_host_and_service(self) -> None:
+        result = parse_nmap_xml(
+            """<nmaprun start="1791509400">
+            <host>
+              <status state="up" reason="syn-ack"/>
+              <address addr="192.0.2.10" addrtype="ipv4"/>
+              <hostnames><hostname name="web.lab"/></hostnames>
+              <ports>
+                <port protocol="tcp" portid="443">
+                  <state state="open" reason="syn-ack"/>
+                  <service name="https" product="nginx" version="1.26"/>
+                </port>
+              </ports>
+            </host>
+            </nmaprun>""",
+            reference="ipv4-fixture.xml",
+        )
+
+        self.assertEqual(result.hosts[0].record_id, "host:192.0.2.10")
+        self.assertEqual(result.hosts[0].hostnames, ("web.lab",))
+        self.assertEqual(
+            result.services[0].record_id,
+            "service:[192.0.2.10]:tcp:443",
+        )
+
+    def test_rejects_address_family_mislabeled_in_xml(self) -> None:
+        with self.assertRaisesRegex(NmapParseError, "marked IPV4 is not IPV4"):
+            parse_nmap_xml(
+                """<nmaprun><host><status state="up"/>
+                <address addr="2001:db8::10" addrtype="ipv4"/>
+                </host></nmaprun>"""
+            )
 
     def test_rejects_malformed_xml(self) -> None:
         with self.assertRaisesRegex(NmapParseError, "invalid Nmap XML"):

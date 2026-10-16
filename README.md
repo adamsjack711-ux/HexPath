@@ -120,6 +120,22 @@ hexpath scan run \
   2001:db8:1::10 > scan.json
 ```
 
+For a focused service scan, select a validated numeric port list or range with
+`--ports`. Custom ports are available only with the `services` profile so they
+cannot silently change the fixed definitions of information levels 0–4:
+
+```sh
+hexpath scan run \
+  --scope examples/lab-scope.example.json \
+  --profile services \
+  --ports 22,80,443,8000-8100 \
+  2001:db8:1::10 > focused-scan.json
+```
+
+If an authorized host does not answer discovery probes, add `-Pn` to
+`scan plan` or `scan run` to tell Nmap to treat the target as online. Preview
+the resulting command with `scan plan` before running it.
+
 When a scan is actually run from an already reached host, record that host as
 the vantage point:
 

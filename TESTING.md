@@ -58,6 +58,8 @@ IPv6), so HexPath refuses every other address. Save this as
 |---|-------|---------|---------------|
 | 3 | Run a service scan | `hexpath scan run --scope lab-vm.scope.json --profile services <VM IP> > scan.json` | `scan.json` lists the services you expect on the VM (confirm against what the VM actually runs). |
 | 3a | Preview a deeper level | `hexpath scan plan --scope lab-vm.scope.json --level 3 <VM IP>` | Prints a scope-checked all-TCP-port command containing `-p-`; it does not run the scan. |
+| 3b | Preview a focused scan | `hexpath scan plan --scope lab-vm.scope.json --profile services --ports 22,80,443 <VM IP>` | Prints a scope-checked command containing `-p 22,80,443`; invalid or empty port ranges are rejected. |
+| 3c | Preview a filtered-host scan | `hexpath scan plan --scope lab-vm.scope.json --profile services -Pn <VM IP>` | Prints a scope-checked command containing `-Pn`; use it only when the authorized target is known to be online. |
 | 4 | Vantage recorded | add `--vantage host:<VM IP>` when scanning from the VM itself | `vantage` in the output is `host:<VM IP>`, not `entry:scanner`. |
 
 ## 3. CVE enrichment

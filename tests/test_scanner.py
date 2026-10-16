@@ -65,6 +65,68 @@ class NmapCommandTests(unittest.TestCase):
         self.assertEqual(command.targets, ("2001:db8:1::/80",))
         self.assertIn("--version-light", command.arguments)
 
+    def test_can_skip_discovery_for_filtered_targets(self) -> None:
+        command = build_nmap_command(
+            self.scope,
+            ["2001:db8:1::10"],
+            ScanProfile.SERVICES,
+            skip_discovery=True,
+        )
+
+        self.assertIn("-Pn", command.arguments)
+        self.assertIn("-sV", command.arguments)
+
+    def test_accepts_numeric_service_port_selection(self) -> None:
+        command = build_nmap_command(
+            self.scope,
+            ["2001:db8:1::10"],
+            ScanProfile.SERVICES,
+            ports="22,80,443,8000-8100",
+        )
+
+        port_index = command.arguments.index("-p")
+        self.assertEqual(command.arguments[port_index + 1], "22,80,443,8000-8100")
+
+    def test_rejects_custom_ports_for_fixed_scan_profiles(self) -> None:
+        for profile in (
+            ScanProfile.DISCOVERY,
+            ScanProfile.QUICK,
+            ScanProfile.FULL,
+            ScanProfile.DEEP,
+        ):
+            with self.subTest(profile=profile), self.assertRaisesRegex(
+                ScannerError,
+                "services profile",
+            ):
+                build_nmap_command(
+                    self.scope,
+                    ["2001:db8:1::10"],
+                    profile,
+                    ports="22",
+                )
+
+    def test_rejects_invalid_port_selection(self) -> None:
+        cases = (
+            ("--script=unsafe", "numbers or ranges"),
+            ("22-", "invalid port range"),
+            ("22--80", "invalid port range"),
+            ("22,,80", "empty entries"),
+            ("0", "between 1 and 65535"),
+            ("65536", "between 1 and 65535"),
+            ("443-80", "descending"),
+        )
+        for ports, message in cases:
+            with self.subTest(ports=ports), self.assertRaisesRegex(
+                ScannerError,
+                message,
+            ):
+                build_nmap_command(
+                    self.scope,
+                    ["2001:db8:1::10"],
+                    ScanProfile.SERVICES,
+                    ports=ports,
+                )
+
     def test_information_levels_map_to_fixed_scan_profiles(self) -> None:
         expected = {
             0: (ScanProfile.DISCOVERY, ("-sn",)),

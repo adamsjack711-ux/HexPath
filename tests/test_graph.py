@@ -10,6 +10,7 @@ import unittest
 
 from hexpath.graph import (
     ENTRY_NODE_ID,
+    MAX_EDGE_WEIGHT,
     AttackGraph,
     GraphEdge,
     GraphError,
@@ -171,6 +172,44 @@ class DijkstraTests(unittest.TestCase):
     def test_rejects_nonpositive_edge_weight(self) -> None:
         with self.assertRaisesRegex(GraphError, "greater than zero"):
             GraphEdge("bad", "a", "b", "transition", 0, "invalid", (evidence(),))
+
+    def test_rejects_edge_weight_that_would_overflow_when_summed(self) -> None:
+        with self.assertRaisesRegex(GraphError, "must not exceed"):
+            GraphEdge("huge", "a", "b", "transition", 1e308, "invalid", (evidence(),))
+
+    def test_path_cost_near_the_cap_does_not_look_unreachable(self) -> None:
+        graph = AttackGraph(
+            nodes=(
+                GraphNode("start", NodeKind.ENTRY, "start"),
+                GraphNode("middle", NodeKind.HOST, "middle"),
+                GraphNode("target", NodeKind.HOST, "target"),
+            ),
+            edges=(
+                GraphEdge(
+                    "sm",
+                    "start",
+                    "middle",
+                    "transition",
+                    MAX_EDGE_WEIGHT,
+                    "start to middle",
+                    (evidence(),),
+                ),
+                GraphEdge(
+                    "mt",
+                    "middle",
+                    "target",
+                    "transition",
+                    MAX_EDGE_WEIGHT,
+                    "middle to target",
+                    (evidence(),),
+                ),
+            ),
+        )
+
+        path = graph.shortest_path("start", "target")
+
+        self.assertIsNotNone(path)
+        self.assertEqual(path.total_weight, 2 * MAX_EDGE_WEIGHT)
 
     def test_ranks_shortest_path_to_every_reachable_host(self) -> None:
         nodes = (

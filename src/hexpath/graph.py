@@ -16,6 +16,11 @@ from hexpath.models import Confidence, Evidence, EvidenceLevel
 
 
 ENTRY_NODE_ID = "entry:scanner"
+# Generated HexPath edges are small (reachability costs are at most 3 and
+# vulnerability costs are at most 14). Reject implausibly large imported
+# weights before a path sum can overflow to infinity and make a reachable
+# target appear unreachable.
+MAX_EDGE_WEIGHT = 1_000_000.0
 DEFAULT_RENDER_MAX_DEPTH = 100
 NETWORK_SCORE_VERSION = "hexpath-network-v1"
 NETWORK_SCORE_COMPONENT_MAXIMUMS = {
@@ -100,6 +105,8 @@ class GraphEdge:
         weight = float(self.weight)
         if not math.isfinite(weight) or weight <= 0:
             raise GraphError("edge weight must be finite and greater than zero")
+        if weight > MAX_EDGE_WEIGHT:
+            raise GraphError(f"edge weight must not exceed {MAX_EDGE_WEIGHT:g}")
         object.__setattr__(self, "weight", weight)
         evidence = tuple(self.evidence)
         if not evidence:

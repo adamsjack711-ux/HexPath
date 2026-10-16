@@ -136,6 +136,49 @@ class ScanCliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn("-sV --version-light -p-", output.getvalue())
 
+    def test_plan_preserves_filtered_host_and_custom_port_options(self) -> None:
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(
+                [
+                    "scan",
+                    "plan",
+                    "--scope",
+                    str(self.scope_path),
+                    "--profile",
+                    "services",
+                    "-Pn",
+                    "--ports",
+                    "22,443,8000-8100",
+                    "2001:db8:1::10",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("-Pn -p 22,443,8000-8100 -sT -sV", output.getvalue())
+
+    def test_plan_rejects_custom_ports_with_a_fixed_level(self) -> None:
+        errors = StringIO()
+
+        with redirect_stderr(errors):
+            exit_code = main(
+                [
+                    "scan",
+                    "plan",
+                    "--scope",
+                    str(self.scope_path),
+                    "--level",
+                    "3",
+                    "--ports",
+                    "22",
+                    "2001:db8:1::10",
+                ]
+            )
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("services profile", errors.getvalue())
+
     def test_plan_prints_ipv4_command_without_ipv6_switch(self) -> None:
         scope_path = self.scope_path.with_name("ipv4-scope.json")
         scope_path.write_text(

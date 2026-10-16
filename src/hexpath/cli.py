@@ -143,6 +143,16 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="0-4",
         help="information level: 0 fastest through 4 deepest",
     )
+    plan_parser.add_argument(
+        "-Pn",
+        dest="skip_discovery",
+        action="store_true",
+        help="skip host discovery and treat targets as online",
+    )
+    plan_parser.add_argument(
+        "--ports",
+        help="ports or ranges for the services profile, such as 22,80,443 or 1-1024",
+    )
     plan_family = plan_parser.add_mutually_exclusive_group()
     plan_family.add_argument(
         "-4",
@@ -189,6 +199,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=_scan_level,
         metavar="0-4",
         help="information level: 0 fastest through 4 deepest",
+    )
+    run_parser.add_argument(
+        "-Pn",
+        dest="skip_discovery",
+        action="store_true",
+        help="skip host discovery and treat targets as online",
+    )
+    run_parser.add_argument(
+        "--ports",
+        help="ports or ranges for the services profile, such as 22,80,443 or 1-1024",
     )
     run_family = run_parser.add_mutually_exclusive_group()
     run_family.add_argument(
@@ -602,6 +622,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 scope,
                 args.targets,
                 args.profile or ScanProfile.DISCOVERY.value,
+                skip_discovery=args.skip_discovery,
+                ports=args.ports,
                 ip_version=args.ip_version,
             )
             print(shlex.join(command.arguments))
@@ -613,6 +635,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 scope,
                 args.targets,
                 args.profile or ScanProfile.DISCOVERY.value,
+                skip_discovery=args.skip_discovery,
+                ports=args.ports,
                 ip_version=args.ip_version,
             )
             xml_output = run_nmap(command, timeout_seconds=args.timeout)

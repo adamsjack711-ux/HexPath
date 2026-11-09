@@ -956,6 +956,10 @@ def build_attack_graph(
             service_hosts.setdefault(service_id, host_id)
 
             state = service.get("state")
+            # A response for a closed/filtered port does not establish service access.
+            # Keep the service node for inventory, but do not use it in an attack route.
+            if state != "open":
+                continue
             evidence = _evidence_list(service.get("evidence", []))
             if not evidence:
                 evidence = (

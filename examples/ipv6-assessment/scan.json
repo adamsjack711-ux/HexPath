@@ -1,0 +1,66 @@
+{
+  "hosts": [
+    {
+      "id": "host:2001:db8::10",
+      "address": "2001:db8::10",
+      "hostnames": [
+        "server.lab"
+      ],
+      "evidence": [
+        {
+          "source": "test",
+          "summary": "Observed during test scan",
+          "level": "observed",
+          "collected_at": "2026-10-08T18:30:00+00:00",
+          "reference": "fixture.json"
+        }
+      ]
+    }
+  ],
+  "services": [
+    {
+      "id": "service:[2001:db8::10]:tcp:22",
+      "host": "2001:db8::10",
+      "port": 22,
+      "protocol": "tcp",
+      "state": "open",
+      "name": "ssh",
+      "product": "OpenSSH",
+      "version": "9.6",
+      "cpes": [
+        "cpe:/a:openbsd:openssh:9.6"
+      ],
+      "evidence": [
+        {
+          "source": "test",
+          "summary": "Observed during test scan",
+          "level": "observed",
+          "collected_at": "2026-10-08T18:30:00+00:00",
+          "reference": "fixture.json"
+        }
+      ]
+    },
+    {
+      "id": "service:[2001:db8::10]:tcp:443",
+      "host": "2001:db8::10",
+      "port": 443,
+      "protocol": "tcp",
+      "state": "open",
+      "name": "https",
+      "product": "Example HTTP",
+      "version": "1.0",
+      "cpes": [
+        "cpe:/a:example:http:1.0"
+      ],
+      "evidence": [
+        {
+          "source": "test",
+          "summary": "Observed during test scan",
+          "level": "observed",
+          "collected_at": "2026-10-08T18:30:00+00:00",
+          "reference": "fixture.json"
+        }
+      ]
+    }
+  ]
+}

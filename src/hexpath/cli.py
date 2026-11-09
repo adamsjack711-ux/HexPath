@@ -11,6 +11,7 @@ import shlex
 import sys
 
 from hexpath import __version__
+from hexpath.assessment import render_assessment, summarize_assessment, validate_scans
 from hexpath.graph import (
     ENTRY_NODE_ID,
     AttackGraph,
@@ -57,7 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the HexPath command-line parser."""
     parser = argparse.ArgumentParser(
         prog="hexpath",
-        description="Authorized IPv4 and IPv6 discovery and attack-path analysis",
+        description="IPv6 network pentesting and evidence-backed attack-path analysis",
     )
     parser.add_argument(
         "-V",
@@ -66,6 +67,22 @@ def build_parser() -> argparse.ArgumentParser:
         version=f"%(prog)s {__version__}",
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
+
+    assess = subcommands.add_parser(
+        "assess", help="assess an IPv6 objective and print a pentest summary",
+    )
+    assess.add_argument("--scope", required=True, help="authorized IPv6 scope JSON")
+    assess.add_argument("--target", required=True, help="objective IPv6 host")
+    assess.add_argument("--from", dest="source", default=ENTRY_NODE_ID,
+                        help="actual scan origin; labels evidence, does not run remotely")
+    assess.add_argument("--scan", action="append", default=[],
+                        help="saved scan JSON; repeat to combine observation points")
+    assess.add_argument("--cves", help="saved CVE results for offline assessment (no live targets)")
+    assess.add_argument("--timeout", type=int, default=300, help="Nmap timeout in seconds")
+    assess.add_argument("--cve-timeout", type=float, default=30)
+    assess.add_argument("--output", help="save full assessment evidence as JSON")
+    assess.add_argument("--json", action="store_true", help="print JSON instead of terminal summary")
+    assess.add_argument("targets", nargs="*", help="explicit IPv6 hosts to scan; omit for saved scans")
 
     scope_parser = subcommands.add_parser(
         "scope",
@@ -605,6 +622,43 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        if args.command == "assess":
+            scope = Scope.from_json_file(args.scope)
+            scope = Scope(scope.name, tuple(network for network in scope.networks if network.version == 6))
+            if not scope.networks:
+                raise ValueError("assessment requires an authorized IPv6 scope")
+            target = f"host:{scope.require_authorized(args.target.removeprefix('host:'))}"
+            raw_source = args.source
+            if raw_source != ENTRY_NODE_ID and not raw_source.startswith("host:"):
+                raw_source = f"host:{raw_source}"
+            source = require_authorized_vantage(scope, raw_source)
+            if not args.targets and not args.scan:
+                raise ValueError("provide IPv6 scan targets or at least one --scan file")
+            if args.cves and args.targets:
+                raise ValueError("--cves is only for saved scans; live targets require fresh enrichment")
+            if args.scan.count("-") + (args.cves == "-") > 1:
+                raise ValueError("standard input can be used only once")
+            scans = validate_scans(scope, _read_json_documents(args.scan, "scan"))
+            if args.targets:
+                # This workflow consumes explicit host seeds, never sweeps an IPv6 prefix.
+                targets = [str(scope.require_authorized(item)) for item in args.targets]
+                command = build_nmap_command(scope, targets, ScanProfile.SERVICES)
+                xml = run_nmap(command, timeout_seconds=args.timeout)
+                scans.append(parse_nmap_xml(xml, reference="live-nmap", vantage=source).to_dict())
+                scans = validate_scans(scope, scans)
+            cves = (
+                _read_json_document(args.cves, "CVE") if args.cves else
+                check_scan_documents(scans, client=NvdClient(
+                    timeout_seconds=args.cve_timeout,
+                    api_key=os.environ.get("NVD_API_KEY"),
+                )).to_dict()
+            )
+            document = summarize_assessment(scope, scans, cves, source=source, target=target)
+            serialized = json.dumps(document, indent=2, sort_keys=True)
+            if args.output:
+                Path(args.output).write_text(serialized + "\n", encoding="utf-8")
+            print(serialized if args.json else render_assessment(document))
+            return 0 if document["coverage_complete"] else 2
         if args.command == "scope" and args.scope_command == "check":
             scope = Scope.from_json_file(args.scope)
             address = scope.require_authorized(args.target)
@@ -855,7 +909,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
                 )
             return 0 if scores else 1
-    except (ScopeError, ScannerError, VulnerabilityError, GraphError, ValueError) as error:
+    except (ScopeError, ScannerError, VulnerabilityError, GraphError, ValueError, OSError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
 

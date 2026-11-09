@@ -1,14 +1,14 @@
 # HexPath
 
-An IPv4 and IPv6 penetration-testing tool for lab practice and authorized engagements.
+An IPv6-focused network penetration-testing tool for lab practice and authorized engagements.
 
-HexPath is our school group project to connect IP network discovery, service assessment, CVE enrichment, and attack-path analysis in one workflow. The goal is to turn a long list of findings into a clear, prioritized view of potential paths through a network, so reviewers can understand how findings relate and where to focus their assessment.
+HexPath helps a network pentester answer: **from my current position, what is exposed over IPv6, and which potential path toward my target should I investigate?** It connects scoped service discovery, CVE candidates, and observations from multiple scan origins into an evidence-backed CLI assessment. This is our school group project; modeled paths guide investigation and do not establish successful exploitation.
 
 ## Project status
 
 HexPath currently provides:
 
-- Dual-stack IPv4 and IPv6 scope validation.
+- IPv6 assessment scope validation; existing low-level utilities retain dual-stack compatibility.
 - Scope-checked Nmap discovery and service scans.
 - Normalized host, service, CPE, evidence, and vulnerability records.
 - NVD CVE lookup for CPEs reported by Nmap.
@@ -18,10 +18,73 @@ HexPath currently provides:
 - Directed attack-graph construction, ASCII terminal rendering, and Dijkstra or A* path analysis.
 - Operator-selected targets and ranked comparison of evidence-backed, loop-free routes.
 - Versioned 0–100 network exposure scoring with transparent component evidence.
+- A target-led `assess` command with a terminal summary and optional JSON evidence bundle.
+
+## IPv6 pentest workflow in the CLI
+
+Start with an authorized scope JSON (see `examples/lab-scope.example.json`),
+explicit IPv6 host addresses, and an objective. Run:
+
+```sh
+hexpath assess --scope examples/lab-scope.example.json \
+  --target 2001:db8:1::20 --output assessment.json \
+  2001:db8:1::10 2001:db8:1::20
+```
+
+This runs IPv6 service detection, enriches the results through NVD, and prints:
+
+- **Observed exposure:** services and their recorded scan origins.
+- **Candidate path to objective:** the lowest-cost modeled route, with every
+  potential compromise labeled `access: UNVERIFIED` and a concrete next check.
+- **Coverage and limitations:** incomplete CVE checks and the limits of the evidence.
+
+`--output` saves the scans, CVE results, graph, scope, and assessment together
+as JSON while keeping the terminal summary visible. `--json` prints the bundle
+instead. Redirect the default output to a text file to retain the CLI summary.
+Exit status is `0` for complete lookup coverage, `2` for incomplete coverage or
+an error; finding a candidate CVE does not itself cause a failure exit status.
+Complete coverage describes the supplied software identities, not proof that
+the network is secure.
+
+The assessment command accepts explicit host seeds, not subnet sweeps. It does
+not enumerate an IPv6 prefix or claim complete host discovery. The existing
+scope rules exclude link-local, multicast, and IPv4-mapped ranges; these are
+not supported assessment targets in this release.
+
+After obtaining authorized access to another host, run a scan **on that host**
+and record its origin using `scan run --vantage host:<IPv6>`. Transfer the result
+back and combine observations using the existing CVE command:
+
+```sh
+hexpath cve scan --input scan.json --input scan-from-host-10.json > cves.json
+hexpath assess --scope examples/lab-scope.example.json \
+  --scan scan.json --scan scan-from-host-10.json --cves cves.json \
+  --target 2001:db8:1::20 --output assessment.json
+```
+
+With `--scan` and `--cves`, assessment is offline. Omit `--cves` to refresh
+enrichment for the saved scans. Saved CVE results cannot be paired with new
+live targets. For a live assessment already running from another host, use
+`--from 2001:db8:1::10`; this records the origin and does not execute remotely.
+
+Reachability and compromise are separate: an open target service can be
+observed even when there is no candidate path. Closed, filtered, and
+`open|filtered` ports remain in the observations but cannot establish graph
+reachability. A candidate CVE does not prove access; the tester must check
+applicability, credentials, exploit conditions, and resulting privileges.
+Costs prioritize investigation and do not measure exploit success probability.
+
+Try the fully synthetic offline example without Nmap or API requests:
+
+```sh
+hexpath assess --scope examples/ipv6-assessment/scope.json \
+  --scan examples/ipv6-assessment/scan.json \
+  --cves examples/ipv6-assessment/cves.json --target 2001:db8::10
+```
 
 ## Workflow
 
-1. **IP discovery** — Identify live IPv4 or IPv6 hosts within the approved assessment scope.
+1. **IPv6 discovery** — Identify live IPv6 hosts within the approved assessment scope.
 2. **Service assessment** — Use Nmap to identify exposed services and their reported versions.
 3. **CVE enrichment** — Add relevant known-vulnerability candidates from NVD and OSV with explicit evidence and coverage status.
 4. **Network modeling** — Represent hosts and potential transitions as a weighted, directed graph.
@@ -372,7 +435,7 @@ Each scan contributes reachability only from its recorded vantage. A path can
 therefore continue from the entry point, through a candidate service finding to
 one host, and then through services observed by a scan run from that host.
 
-Candidate exploit costs use `11 - CVSS score`, plus a confidence penalty of `0` for high, `1.5` for medium, or `3` for low confidence. A missing CVSS score uses the neutral value `5.0`. Both algorithms minimize the total cost. These costs rank investigation paths; they are not exploit probabilities.
+Candidate exploit costs use `11 - CVSS score`, plus a confidence penalty of `0` for high, `1.5` for medium, or `3` for low confidence. A missing CVSS score uses the neutral value `5.0`. Only observed open services contribute reachability edges. Both algorithms minimize the total cost. These costs rank investigation paths; they are not exploit probabilities.
 
 Network-wide exposure ranking considers modeled accessibility, path depth,
 route redundancy, downstream reach, and exploit evidence. It still does not
@@ -391,3 +454,8 @@ python -m unittest discover --start-directory tests --verbose
 2. Use [Issues](https://github.com/adamsjack711-ux/HexPath/issues) to propose ideas, track tasks, and report problems. Add enough context for a teammate to pick up the work.
 3. Work on a separate branch and open a pull request into the default branch. Ask a teammate to review it before merging.
 4. Keep this README updated as we agree on the scope and how to run the tool.
+
+## Next milestone
+
+Extend candidate-path analysis with explicit exploit preconditions and tester-recorded
+validation outcomes; the current assessment does not record confirmed compromise.

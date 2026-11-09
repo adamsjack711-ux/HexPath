@@ -1,0 +1,6 @@
+{
+  "name": "Synthetic IPv6 pentest demo",
+  "targets": [
+    "2001:db8::/64"
+  ]
+}

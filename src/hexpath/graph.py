@@ -1082,6 +1082,25 @@ def build_attack_graph(
         if not evidence:
             raise GraphError(f"vulnerability match {key!r} has no supporting evidence")
         reason = _required_text(match.get("reason"), "match reason")
+        applicability = match.get("applicability", "candidate")
+        if applicability not in {"candidate", "ruled_out"}:
+            raise GraphError(f"vulnerability match {key!r} has invalid applicability")
+        access_supported = match.get("access_supported", False)
+        if not isinstance(access_supported, bool):
+            raise GraphError(f"vulnerability match {key!r} has invalid access_supported")
+        if applicability == "ruled_out":
+            if access_supported:
+                raise GraphError(f"vulnerability match {key!r} cannot be ruled out and support access")
+            applicability_evidence = _evidence_list(match.get("applicability_evidence"))
+            if not any(item.level == EvidenceLevel.OBSERVED for item in applicability_evidence):
+                raise GraphError(f"vulnerability match {key!r} needs observed applicability evidence")
+            continue
+        if not access_supported:
+            continue  # A CVE association alone does not establish host access.
+        access_basis = _required_text(match.get("access_basis"), "access_basis")
+        access_evidence = _evidence_list(match.get("access_evidence"))
+        if not any(item.level == EvidenceLevel.OBSERVED for item in access_evidence):
+            raise GraphError(f"vulnerability match {key!r} needs observed access evidence")
         edges.append(
             GraphEdge(
                 edge_id=f"edge:exploit:{service_id}:{cve_id}",
@@ -1090,12 +1109,13 @@ def build_attack_graph(
                 relationship="candidate_exploit",
                 weight=vulnerability_cost(score, confidence),
                 description=f"{cve_id} may provide access to {service_hosts[service_id]}",
-                evidence=evidence,
+                evidence=(*evidence, *access_evidence),
                 metadata={
                     "cve_id": cve_id,
                     "cvss_score": score,
                     "confidence": confidence.value,
                     "reason": reason,
+                    "access_basis": access_basis,
                 },
             )
         )

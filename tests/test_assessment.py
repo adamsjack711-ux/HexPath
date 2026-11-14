@@ -109,6 +109,19 @@ class AssessmentTests(unittest.TestCase):
         self.assertEqual(result["excluded_match_count"], 2)
         self.assertIn("no precise version", render_assessment(result))
 
+    def test_observed_local_evidence_can_rule_out_cve_candidates(self):
+        for match in self.cves["matches"]:
+            match.pop("access_supported")
+            match.pop("access_basis")
+            match.pop("access_evidence")
+            match["applicability"] = "ruled_out"
+            match["applicability_evidence"] = [self.scan["services"][0]["evidence"][0]]
+        result = self.summarize()
+        self.assertEqual(result["excluded_match_count"], 2)
+        self.assertEqual(result["modeled_matches"], [])
+        self.assertIsNone(result["candidate_path"])
+        self.assertIn("local evidence rules out", render_assessment(result))
+
     def test_empty_scan_never_has_complete_coverage(self):
         self.scan = {"hosts": [], "services": []}
         self.cves = {"completed": True, "coverage": {"services": 0},

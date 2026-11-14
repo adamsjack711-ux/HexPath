@@ -36,6 +36,10 @@ NVD_INTERVAL_WITH_KEY_SECONDS = 0.6
 NVD_DEFAULT_MAX_RETRIES = 3
 MAX_RETRY_AFTER_SECONDS = 120.0
 _RETRYABLE_HTTP_STATUSES = frozenset({403, 429, 503})
+_UNRESOLVED_NVD_REASONS = frozenset({
+    "NVD has no affected-product configuration to verify",
+    "NVD version range could not be verified for this CPE",
+})
 _CVE_PATTERN = re.compile(r"^CVE-[0-9]{4}-[0-9]{4,}$", re.IGNORECASE)
 
 
@@ -230,11 +234,13 @@ class CpeVulnerabilityResult:
     cpe: CpeIdentity
     completed: bool
     vulnerabilities: tuple[Vulnerability, ...] = ()
+    excluded: tuple[dict[str, str], ...] = ()
     error: str | None = None
     source: str = "NVD"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "vulnerabilities", tuple(self.vulnerabilities))
+        object.__setattr__(self, "excluded", tuple(self.excluded))
         if self.completed and self.error is not None:
             raise VulnerabilityError("a completed lookup cannot contain an error")
         if not self.completed and not self.error:
@@ -248,16 +254,24 @@ class CpeVulnerabilityResult:
             return VulnerabilityStatus.UNKNOWN
         if self.vulnerabilities:
             return VulnerabilityStatus.VULNERABLE
+        if not self.screening_complete:
+            return VulnerabilityStatus.UNKNOWN
         return VulnerabilityStatus.CLEAN
+
+    @property
+    def screening_complete(self) -> bool:
+        return not any(item.get("reason") in _UNRESOLVED_NVD_REASONS for item in self.excluded)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "source": self.source,
             "status": self.status.value,
             "completed": self.completed,
+            "screening_complete": self.screening_complete,
             "error": self.error,
             "cpe": self.cpe.value,
             "vulnerabilities": [item.to_dict() for item in self.vulnerabilities],
+            "excluded": list(self.excluded),
         }
 
     def to_json(self, *, indent: int | None = 2) -> str:
@@ -296,7 +310,7 @@ class ScanVulnerabilityResult:
         return (
             not self.unmatched_services
             and not self.invalid_cpes
-            and all(check.completed for check in self.checks)
+            and all(check.completed and check.screening_complete for check in self.checks)
         )
 
     @property
@@ -317,7 +331,10 @@ class ScanVulnerabilityResult:
                 "services_with_cpe": self.service_count - len(self.unmatched_services),
                 "services_without_cpe": len(self.unmatched_services),
                 "cpe_checks": len(self.checks),
-                "completed_cpe_checks": sum(check.completed for check in self.checks),
+                "completed_cpe_checks": sum(
+                    check.completed and check.screening_complete
+                    for check in self.checks
+                ),
                 "invalid_cpes": len(self.invalid_cpes),
             },
             "unmatched_services": list(self.unmatched_services),
@@ -435,7 +452,15 @@ class NvdClient:
 
     def query_cpe(self, cpe: CpeIdentity) -> tuple[Vulnerability, ...]:
         """Return every CVE NVD lists for the CPE, fetching all result pages."""
+        vulnerabilities, _excluded = self.query_cpe_review(cpe)
+        return vulnerabilities
+
+    def query_cpe_review(
+        self, cpe: CpeIdentity,
+    ) -> tuple[tuple[Vulnerability, ...], tuple[dict[str, str], ...]]:
+        """Keep direct vulnerable-product matches and explain excluded records."""
         collected: dict[str, Vulnerability] = {}
+        excluded: dict[str, dict[str, str]] = {}
         received = 0
         expected_total: int | None = None
         while True:
@@ -447,8 +472,15 @@ class NvdClient:
                 raise VulnerabilityLookupError(
                     "NVD result count changed during pagination; try the lookup again"
                 )
-            for vulnerability in page:
-                collected.setdefault(vulnerability.cve_id, vulnerability)
+            for vulnerability, raw in zip(page, document["vulnerabilities"]):
+                reason = _nvd_exclusion_reason(raw["cve"], cpe)
+                if reason is None:
+                    collected.setdefault(vulnerability.cve_id, vulnerability)
+                    excluded.pop(vulnerability.cve_id, None)
+                elif vulnerability.cve_id not in collected:
+                    excluded.setdefault(vulnerability.cve_id, {
+                        "cve_id": vulnerability.cve_id, "reason": reason,
+                    })
             received += len(page)
             if received >= expected_total:
                 break
@@ -461,7 +493,7 @@ class NvdClient:
             raise VulnerabilityLookupError(
                 f"NVD returned {received} results but reported {expected_total}"
             )
-        return tuple(collected.values())
+        return tuple(collected.values()), tuple(excluded.values())
 
     def _get_page(self, cpe: CpeIdentity, start_index: int) -> Any:
         query = urlencode(
@@ -559,7 +591,7 @@ def check_cpe(
     """Run an exact NVD CPE lookup while preserving incomplete coverage."""
     provider = client or NvdClient()
     try:
-        vulnerabilities = provider.query_cpe(cpe)
+        vulnerabilities, excluded = provider.query_cpe_review(cpe)
     except VulnerabilityLookupError as error:
         return CpeVulnerabilityResult(
             cpe=cpe,
@@ -570,6 +602,7 @@ def check_cpe(
         cpe=cpe,
         completed=True,
         vulnerabilities=vulnerabilities,
+        excluded=excluded,
     )
 
 
@@ -844,6 +877,111 @@ def _parse_nvd_vulnerability(document: Any) -> Vulnerability:
         cvss_vector=vector,
         references=tuple(dict.fromkeys(urls)),
     )
+
+
+def _nvd_exclusion_reason(cve: dict[str, Any], cpe: CpeIdentity) -> str | None:
+    """Require a direct, vulnerable NVD criterion for the queried product."""
+    if cve.get("vulnStatus") == "Rejected":
+        return "NVD marks the CVE rejected"
+    configurations = cve.get("configurations")
+    if configurations is None or configurations == []:
+        return "NVD has no affected-product configuration to verify"
+    if not isinstance(configurations, list):
+        raise VulnerabilityLookupError("NVD CVE record has invalid configurations")
+    conditional = False
+    uncertain_version = False
+    for configuration in configurations:
+        if not isinstance(configuration, dict):
+            raise VulnerabilityLookupError("NVD CVE record has invalid configurations")
+        nodes = configuration.get("nodes", [])
+        if not isinstance(nodes, list):
+            raise VulnerabilityLookupError("NVD CVE record has invalid configuration nodes")
+        stack = [(node, configuration.get("operator") == "AND") for node in nodes]
+        while stack:
+            node, needs_other = stack.pop()
+            if not isinstance(node, dict):
+                raise VulnerabilityLookupError("NVD CVE record has invalid configuration node")
+            if node.get("negate") is True:
+                continue
+            needs_other = needs_other or node.get("operator") == "AND"
+            matches = node.get("cpeMatch", [])
+            if not isinstance(matches, list):
+                raise VulnerabilityLookupError("NVD CVE record has invalid CPE matches")
+            for match in matches:
+                if not isinstance(match, dict):
+                    raise VulnerabilityLookupError("NVD CVE record has invalid CPE match")
+                if match.get("vulnerable") is not True:
+                    continue
+                result = _matches_nvd_criterion(match, cpe)
+                if result == "uncertain":
+                    uncertain_version = True
+                elif result == "match":
+                    if needs_other:
+                        conditional = True
+                    else:
+                        return None
+            children = node.get("children", [])
+            if not isinstance(children, list):
+                raise VulnerabilityLookupError("NVD CVE record has invalid child nodes")
+            stack.extend((child, needs_other) for child in children)
+    if conditional:
+        return "NVD requires another product or platform; condition not verified"
+    if uncertain_version:
+        return "NVD version range could not be verified for this CPE"
+    return "queried CPE is not marked vulnerable in NVD configurations"
+
+
+def _matches_nvd_criterion(match: dict[str, Any], cpe: CpeIdentity) -> str:
+    criteria = match.get("criteria")
+    if not isinstance(criteria, str) or not criteria.startswith("cpe:2.3:"):
+        return "none"
+    parts = criteria.split(":")
+    queried = cpe.value.split(":")
+    if len(parts) != 13:
+        return "none"
+    for index in range(2, 13):
+        if index == 5:
+            continue
+        # Nmap's CPE 2.2 names leave these attributes unspecified. NVD often
+        # denotes an inapplicable attribute with '-', which its cpeName query
+        # still matches against an unspecified ('*') input.
+        if parts[index] not in {"*", queried[index]} and not (
+            parts[index] == "-" and queried[index] == "*"
+        ):
+            return "none"
+    if parts[5] not in {"*", queried[5]}:
+        return "none"
+    version = _numeric_version(queried[5])
+    for key, inclusive, lower in (
+        ("versionStartIncluding", True, True),
+        ("versionStartExcluding", False, True),
+        ("versionEndIncluding", True, False),
+        ("versionEndExcluding", False, False),
+    ):
+        bound = match.get(key)
+        if bound is None:
+            continue
+        boundary = _numeric_version(bound)
+        if version is None or boundary is None:
+            return "uncertain"
+        width = max(len(version), len(boundary))
+        comparison = (version + (0,) * (width - len(version))) > (boundary + (0,) * (width - len(boundary)))
+        equal = (version + (0,) * (width - len(version))) == (boundary + (0,) * (width - len(boundary)))
+        if lower and not (comparison or (inclusive and equal)):
+            return "none"
+        if not lower and (comparison or (equal and not inclusive)):
+            return "none"
+    return "match"
+
+
+def _numeric_version(value: Any) -> tuple[int, ...] | None:
+    if not isinstance(value, str):
+        return None
+    match = re.fullmatch(r"(\d+(?:\.\d+)*)(?:p(\d+))?", value)
+    if match is None:
+        return None
+    numbers = tuple(int(part) for part in match.group(1).split("."))
+    return (*numbers, int(match.group(2))) if match.group(2) is not None else numbers
 
 
 def _select_nvd_cvss(metrics: Any) -> tuple[float | None, str | None]:

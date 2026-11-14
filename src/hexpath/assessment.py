@@ -105,11 +105,12 @@ def summarize_assessment(
         and coverage.get("services") == len(service_ids)
         and all(item.get("cpes") for item in observations)
         and expected_cpes <= covered_cpes
-        and all(check.get("completed") is True for check in checks)
+        and all(check.get("completed") is True and check.get("screening_complete") is not False
+                and check.get("status") != "unknown" for check in checks)
         and not cves.get("unmatched_services") and not cves.get("invalid_cpes")
     )
     return {
-        "schema_version": "hexpath-ipv6-assessment-v1",
+        "schema_version": "hexpath-ipv6-assessment-v2",
         "scope": {"name": scope.name, "targets": [str(n) for n in scope.networks]},
         "source": source, "target": target,
         "target_observed": target in node_ids,
@@ -125,6 +126,7 @@ def summarize_assessment(
         },
         "limitations": [
             "CVE matches are investigation candidates, not confirmed compromise.",
+            "CVE matches do not create access paths without observed access-effect evidence.",
             "Path costs rank investigation routes, not exploit success probabilities.",
             "Scan origins are operator declarations; HexPath does not pivot or verify access.",
             "No modeled path does not establish that a target is secure or unreachable.",
@@ -156,6 +158,21 @@ def _modeled_matches(
     for match in matches:
         if not isinstance(match, dict):
             raise ValueError("CVE matches must contain objects")
+        applicability = match.get("applicability", "candidate")
+        if applicability not in {"candidate", "ruled_out"}:
+            raise ValueError("CVE match applicability must be candidate or ruled_out")
+        if applicability == "ruled_out":
+            if match.get("access_supported") is True:
+                raise ValueError("ruled-out CVE match cannot support access")
+            evidence = match.get("applicability_evidence", [])
+            if not isinstance(evidence, list) or not any(
+                isinstance(item, dict) and item.get("level") == "observed"
+                for item in evidence
+            ):
+                raise ValueError("ruled-out CVE match requires observed applicability evidence")
+            reason = "local evidence rules out CVE applicability"
+            excluded[reason] = excluded.get(reason, 0) + 1
+            continue
         service_id = match.get("service_id")
         if service_id not in service_cpes:
             modeled.append(match)  # Let graph validation report an unknown service.
@@ -193,8 +210,21 @@ def render_assessment(document: dict[str, Any]) -> str:
         if isinstance(match, dict) and match.get("service_id") in target_ids
         and isinstance(match.get("cve_id"), str)
     }
+    target_matches = {
+        match["cve_id"]: match for match in matches
+        if isinstance(match, dict) and match.get("service_id") in target_ids
+        and isinstance(match.get("cve_id"), str)
+    }
+    vulnerabilities = {
+        item["id"]: item for item in document["cves"].get("vulnerabilities", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
     checks = document["cves"].get("checks", [])
-    completed_checks = sum(check.get("completed") is True for check in checks)
+    completed_checks = sum(
+        check.get("completed") is True and check.get("screening_complete") is not False
+        and check.get("status") != "unknown"
+        for check in checks
+    )
     lines = [
         "HexPath IPv6 Pentest Assessment", "===============================",
         f"Scope: {document['scope']['name']}",
@@ -203,6 +233,8 @@ def render_assessment(document: dict[str, Any]) -> str:
         f"  Target services observed: {len(target_ids)}",
         f"  Other hosts observed: {len(other_hosts)}",
         f"  Target CVE candidates: {len(target_candidates)} (not verified vulnerabilities)",
+        f"  Target CVE links with observed access-effect evidence: "
+        f"{sum(match.get('access_supported') is True for match in target_matches.values())}",
         f"  NVD CPE checks completed: {completed_checks}/{len(checks)}",
         f"  CVE links excluded from routes: {document['excluded_match_count']}",
         "", "TARGET EXPOSURE",
@@ -226,10 +258,26 @@ def render_assessment(document: dict[str, Any]) -> str:
             lines.append(f"  {host}: {len(service_ids)} service(s); full evidence is in assessment JSON")
     else:
         lines.append("  None recorded.")
-    lines.extend(["", "CANDIDATE PATH TO OBJECTIVE"])
+    lines.extend(["", "CVE REVIEW FOR TARGET"])
+    if not target_matches:
+        lines.append("  No version-supported CVE candidates in the available evidence.")
+    else:
+        ranked = sorted(target_matches, key=lambda cve_id: (
+            -(vulnerabilities.get(cve_id, {}).get("cvss_score") or 0), cve_id,
+        ))
+        lines.append(f"  Showing {min(10, len(ranked))} of {len(ranked)}; full list is in assessment JSON.")
+        for cve_id in ranked[:10]:
+            vulnerability = vulnerabilities.get(cve_id, {})
+            score = vulnerability.get("cvss_score")
+            label = f"CVSS {score:.1f}" if isinstance(score, (int, float)) else "CVSS unknown"
+            access = "observed access effect" if target_matches[cve_id].get("access_supported") is True else "access effect unverified"
+            lines.append(f"  {cve_id} | {label} | {access}")
+            summary = str(vulnerability.get("description") or "No description supplied")
+            lines.append(f"     {summary[:140]}{'...' if len(summary) > 140 else ''}")
+    lines.extend(["", "ACCESS PATH TO OBJECTIVE"])
     path = document["candidate_path"]
     if path is None:
-        lines.append("  No modeled path in the available evidence; this does not mean secure.")
+        lines.append("  No supported access path in the available evidence; this does not mean secure.")
     else:
         lines.append(f"  Investigation cost: {path['total_cost']:.2f}")
         for index, step in enumerate(path["steps"], 1):
@@ -258,6 +306,11 @@ def render_assessment(document: dict[str, Any]) -> str:
     for check in checks:
         if check.get("error"):
             lines.append(f"  Lookup failed for {check['cpe']}: {check['error']}")
+        excluded = check.get("excluded", [])
+        if excluded:
+            lines.append(f"  NVD records excluded for {check['cpe']}: {len(excluded)}")
+            for record in excluded[:5]:
+                lines.append(f"    {record['cve_id']}: {record['reason']}")
     for item in document["cves"].get("invalid_cpes", []):
         lines.append(f"  Unchecked CPE on {item['service_id']}: {item['cpe']} ({item['error']})")
     for service_id in document["cves"].get("unmatched_services", []):

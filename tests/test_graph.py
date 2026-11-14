@@ -114,6 +114,9 @@ def sample_documents() -> tuple[dict, dict]:
                 "confidence": "medium",
                 "reason": "Exact CPE candidate; patch status unknown.",
                 "evidence": [inferred],
+                "access_supported": True,
+                "access_basis": "Synthetic observed access effect for graph tests.",
+                "access_evidence": [observed],
             },
             {
                 "service_id": web_id,
@@ -121,6 +124,9 @@ def sample_documents() -> tuple[dict, dict]:
                 "confidence": "high",
                 "reason": "Validated package identity.",
                 "evidence": [inferred],
+                "access_supported": True,
+                "access_basis": "Synthetic observed access effect for graph tests.",
+                "access_evidence": [observed],
             },
         ],
     }
@@ -136,6 +142,22 @@ class WeightTests(unittest.TestCase):
 
     def test_missing_cvss_uses_neutral_score(self) -> None:
         self.assertEqual(vulnerability_cost(None, Confidence.MEDIUM), 7.5)
+
+    def test_cve_candidate_without_access_effect_does_not_create_path(self) -> None:
+        scan, cves = sample_documents()
+        for match in cves["matches"]:
+            match.pop("access_supported")
+            match.pop("access_basis")
+            match.pop("access_evidence")
+        graph = build_attack_graph(scan, cves)
+        self.assertIsNone(graph.shortest_path(ENTRY_NODE_ID, "host:2001:db8::10"))
+        self.assertFalse(any(edge.relationship == "candidate_exploit" for edge in graph.edges))
+
+    def test_access_flag_requires_observed_effect_evidence(self) -> None:
+        scan, cves = sample_documents()
+        cves["matches"][0]["access_evidence"] = []
+        with self.assertRaisesRegex(GraphError, "observed access evidence"):
+            build_attack_graph(scan, cves)
 
 
 class DijkstraTests(unittest.TestCase):
@@ -970,6 +992,9 @@ class BuilderTests(unittest.TestCase):
                         "confidence": "high",
                         "reason": "Test candidate",
                         "evidence": [observed],
+                        "access_supported": True,
+                        "access_basis": "Synthetic observed access effect for graph tests.",
+                        "access_evidence": [observed],
                     }
                 ],
             },
@@ -1058,6 +1083,9 @@ class BuilderTests(unittest.TestCase):
                 "cve_id": "CVE-2026-22222",
                 "confidence": "medium",
                 "reason": "Exact CPE candidate; patch status unknown.",
+                "access_supported": True,
+                "access_basis": "Synthetic observed access effect for graph tests.",
+                "access_evidence": [evidence().to_dict()],
                 "evidence": [
                     Evidence(
                         source="nvd",

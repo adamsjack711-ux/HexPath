@@ -299,6 +299,11 @@ class VulnerabilityMatch:
     reason: str
     evidence: tuple[Evidence, ...]
     cpe: str | None = None
+    access_supported: bool = False
+    access_basis: str | None = None
+    access_evidence: tuple[Evidence, ...] = ()
+    applicability: str = "candidate"
+    applicability_evidence: tuple[Evidence, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -319,6 +324,29 @@ class VulnerabilityMatch:
         object.__setattr__(self, "evidence", evidence)
         if self.cpe is not None:
             object.__setattr__(self, "cpe", _require_text(self.cpe, "cpe"))
+        if not isinstance(self.access_supported, bool):
+            raise ModelError("access_supported must be a boolean")
+        access_evidence = tuple(self.access_evidence)
+        if self.access_supported:
+            object.__setattr__(self, "access_basis", _require_text(self.access_basis, "access_basis"))
+            if not access_evidence or not any(item.level == EvidenceLevel.OBSERVED for item in access_evidence):
+                raise ModelError("supported access requires observed access evidence")
+        elif self.access_basis is not None or access_evidence:
+            raise ModelError("access evidence requires access_supported=true")
+        object.__setattr__(self, "access_evidence", access_evidence)
+        if self.applicability not in {"candidate", "ruled_out"}:
+            raise ModelError("applicability must be candidate or ruled_out")
+        applicability_evidence = tuple(self.applicability_evidence)
+        if self.applicability == "ruled_out":
+            if self.access_supported:
+                raise ModelError("a ruled-out match cannot support access")
+            if not applicability_evidence or not any(
+                item.level == EvidenceLevel.OBSERVED for item in applicability_evidence
+            ):
+                raise ModelError("ruled-out applicability requires observed evidence")
+        elif applicability_evidence:
+            raise ModelError("applicability evidence requires ruled_out status")
+        object.__setattr__(self, "applicability_evidence", applicability_evidence)
 
     @property
     def record_id(self) -> str:
@@ -335,6 +363,13 @@ class VulnerabilityMatch:
         }
         if self.cpe is not None:
             result["cpe"] = self.cpe
+        if self.access_supported:
+            result["access_supported"] = True
+            result["access_basis"] = self.access_basis
+            result["access_evidence"] = [item.to_dict() for item in self.access_evidence]
+        if self.applicability == "ruled_out":
+            result["applicability"] = "ruled_out"
+            result["applicability_evidence"] = [item.to_dict() for item in self.applicability_evidence]
         return result
 
 

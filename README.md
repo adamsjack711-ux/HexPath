@@ -38,8 +38,10 @@ This runs IPv6 service detection, enriches the results through NVD, and prints:
 - **Target exposure:** the objective's services and their recorded scan origins.
 - **Other observed hosts:** a compact host inventory; the JSON bundle retains
   every service and its evidence.
-- **Candidate path to objective:** the lowest-cost modeled route, with every
-  potential compromise labeled `access: UNVERIFIED` and a concrete next check.
+- **CVE review for target:** version-supported candidates, CVSS, and a short
+  description, with the complete list in JSON.
+- **Access path to objective:** a modeled route only when an operator has
+  recorded observed evidence for a host-access effect.
 - **Coverage and limitations:** failed checks named by CPE, services without a
   CPE, and the limits of the evidence.
 
@@ -73,10 +75,11 @@ live targets. For a live assessment already running from another host, use
 `--from 2001:db8:1::10`; this records the origin and does not execute remotely.
 
 Reachability and compromise are separate: an open target service can be
-observed even when there is no candidate path. Closed, filtered, and
+observed even when there is no supported access path. Closed, filtered, and
 `open|filtered` ports remain in the observations but cannot establish graph
-reachability. A candidate CVE does not prove access; the tester must check
-applicability, credentials, exploit conditions, and resulting privileges.
+reachability. A candidate CVE does not create a host-access edge; the tester
+must check applicability, credentials, exploit conditions, and resulting
+privileges before recording an access effect.
 Costs prioritize investigation and do not measure exploit success probability.
 NVD returns investigation candidates, and local version, patch, module, and
 configuration evidence is still needed before calling a host vulnerable.
@@ -84,8 +87,36 @@ HexPath removes MariaDB's `5.5.5-` compatibility prefix from its NVD query
 identity. Missing versions and single-number versions such as `Samba 4` are
 reported as incomplete coverage instead of producing broad CVE associations.
 Saved CVE links also need a completed check for the service's current precise
-CPE before they can form a candidate route. The assessment JSON retains the
+CPE before they can appear in a target's CVE review. The assessment JSON retains the
 original links and reports how many were excluded from the model.
+NVD configurations must mark the queried product as vulnerable. HexPath screens
+out records where it is only a supporting platform, where an additional product
+is required, or where the version range does not match. Those records remain
+listed under each check's `excluded` field.
+
+An operator can rule out a candidate with `applicability: "ruled_out"` and an
+`applicability_evidence` list containing an observed record. To permit a CVE
+link to form a candidate access edge, the match must instead contain
+`access_supported: true`, an `access_basis`, and observed `access_evidence`.
+For example, the latter record can describe a verified lab test and cite its
+saved evidence. NVD-generated matches do not set this flag.
+
+```json
+{
+  "access_supported": true,
+  "access_basis": "Observed host access from this service during the authorized test",
+  "access_evidence": [{
+    "source": "operator",
+    "summary": "Saved test evidence describes the resulting access",
+    "level": "observed",
+    "collected_at": "2026-11-14T19:00:00+00:00",
+    "reference": "evidence/access-check.txt"
+  }]
+}
+```
+
+These fields belong on a CVE match in a saved CVE JSON document. The example
+timestamp and evidence path are placeholders; use the actual observed record.
 
 Try the fully synthetic offline example without Nmap or API requests:
 
@@ -276,7 +307,7 @@ three times, honouring NVD's `Retry-After` header when present, before
 recording that CPE as an incomplete lookup. CPEs with more results than fit
 in one NVD response are fetched page by page.
 
-CPE findings are candidate matches. Nmap identifies the product and version remotely, and NVD identifies applicable CVEs, but a vendor may have backported a patch without changing the reported version. HexPath therefore records these links as inferred, medium-confidence evidence until patch status is validated.
+CPE findings are candidate matches. Nmap identifies the product and version remotely, and NVD identifies affected-product configurations, but a vendor may have backported a patch without changing the reported version. HexPath records these links as inferred, medium-confidence evidence until local patch and runtime conditions are validated. CVE association alone never creates a graph access edge.
 
 ## Attack graph
 

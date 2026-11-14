@@ -24,6 +24,12 @@ from hexpath.vulnerabilities import (
 )
 
 
+def direct_nvd_configuration(cpe: str) -> list[dict]:
+    return [{"nodes": [{"operator": "OR", "cpeMatch": [
+        {"vulnerable": True, "criteria": cpe},
+    ]}]}]
+
+
 class PackageIdentityTests(unittest.TestCase):
     def test_requires_exact_non_empty_coordinates(self) -> None:
         with self.assertRaisesRegex(VulnerabilityError, "version"):
@@ -198,6 +204,7 @@ class NvdClientTests(unittest.TestCase):
                         {
                             "cve": {
                                 "id": "CVE-2026-12345",
+                                "configurations": direct_nvd_configuration(self.cpe.value),
                                 "descriptions": [
                                     {"lang": "en", "value": "Example network vulnerability."}
                                 ],
@@ -232,6 +239,89 @@ class NvdClientTests(unittest.TestCase):
         self.assertEqual(result.vulnerabilities[0].cve_id, "CVE-2026-12345")
         self.assertEqual(result.vulnerabilities[0].cvss_score, 8.1)
         self.assertTrue(result.vulnerabilities[0].cvss_vector.startswith("CVSS:3.1"))
+
+    def test_nvd_platform_and_conditional_records_are_not_direct_matches(self) -> None:
+        mariadb = CpeIdentity("cpe:/a:mariadb:mariadb:10.11.14")
+        direct = {"nodes": [{"operator": "OR", "cpeMatch": [{
+            "vulnerable": True,
+            "criteria": "cpe:2.3:a:mariadb:mariadb:*:*:*:*:*:*:*:*",
+            "versionStartIncluding": "10.11.1",
+            "versionEndExcluding": "10.11.18",
+        }]}]}
+        platform = {"operator": "AND", "nodes": [
+            {"operator": "OR", "cpeMatch": [{"vulnerable": True,
+                "criteria": "cpe:2.3:a:mantisbt:mantisbt:2.5.2:*:*:*:*:*:*:*"}]},
+            {"operator": "OR", "cpeMatch": [{"vulnerable": False,
+                "criteria": "cpe:2.3:a:mariadb:mariadb:*:*:*:*:*:*:*:*"}]},
+        ]}
+        conditional = {"operator": "AND", "nodes": [
+            {"operator": "OR", "cpeMatch": [{"vulnerable": True,
+                "criteria": "cpe:2.3:a:mariadb:mariadb:*:*:*:*:*:*:*:*"}]},
+            {"operator": "OR", "cpeMatch": [{"vulnerable": False,
+                "criteria": "cpe:2.3:a:example:plugin:*:*:*:*:*:*:*:*"}]},
+        ]}
+        response = {"totalResults": 3, "vulnerabilities": [
+            {"cve": {"id": "CVE-2026-00001", "configurations": [direct]}},
+            {"cve": {"id": "CVE-2026-00002", "configurations": [platform]}},
+            {"cve": {"id": "CVE-2026-00003", "configurations": [conditional]}},
+        ]}
+        client = NvdClient(transport=lambda *_: json.dumps(response).encode())
+        result = check_cpe(mariadb, client=client)
+        self.assertEqual([v.cve_id for v in result.vulnerabilities], ["CVE-2026-00001"])
+        self.assertEqual([v["cve_id"] for v in result.excluded],
+                         ["CVE-2026-00002", "CVE-2026-00003"])
+        self.assertIn("not marked vulnerable", result.excluded[0]["reason"])
+        self.assertIn("another product", result.excluded[1]["reason"])
+
+    def test_nvd_version_range_excludes_patched_version(self) -> None:
+        cpe = CpeIdentity("cpe:/a:mariadb:mariadb:10.11.18")
+        response = {"totalResults": 1, "vulnerabilities": [{"cve": {
+            "id": "CVE-2026-00004",
+            "configurations": [{"nodes": [{"operator": "OR", "cpeMatch": [{
+                "vulnerable": True,
+                "criteria": "cpe:2.3:a:mariadb:mariadb:*:*:*:*:*:*:*:*",
+                "versionEndExcluding": "10.11.18",
+            }]}]}],
+        }}]}
+        result = check_cpe(cpe, client=NvdClient(transport=lambda *_: json.dumps(response).encode()))
+        self.assertEqual(result.status, VulnerabilityStatus.CLEAN)
+        self.assertEqual(result.vulnerabilities, ())
+
+    def test_openssh_patch_version_can_be_checked_against_minor_range(self) -> None:
+        cpe = CpeIdentity("cpe:/a:openbsd:openssh:8.4p1")
+        response = {"totalResults": 1, "vulnerabilities": [{"cve": {
+            "id": "CVE-2023-38408",
+            "configurations": [{"nodes": [{"operator": "OR", "cpeMatch": [{
+                "vulnerable": True,
+                "criteria": "cpe:2.3:a:openbsd:openssh:*:*:*:*:*:*:*:*",
+                "versionEndExcluding": "9.3",
+            }]}]}],
+        }}]}
+        result = check_cpe(cpe, client=NvdClient(transport=lambda *_: json.dumps(response).encode()))
+        self.assertEqual([v.cve_id for v in result.vulnerabilities], ["CVE-2023-38408"])
+        self.assertTrue(result.screening_complete)
+
+    def test_nvd_not_applicable_edition_matches_unspecified_nmap_cpe(self) -> None:
+        cpe = CpeIdentity("cpe:/a:mongodb:mongodb:4.4.30")
+        response = {"totalResults": 1, "vulnerabilities": [{"cve": {
+            "id": "CVE-2026-11933",
+            "configurations": [{"nodes": [{"operator": "OR", "cpeMatch": [{
+                "vulnerable": True,
+                "criteria": "cpe:2.3:a:mongodb:mongodb:*:*:*:*:-:*:*:*",
+                "versionStartIncluding": "4.4.0",
+                "versionEndExcluding": "4.4.31",
+            }]}]}],
+        }}]}
+        result = check_cpe(cpe, client=NvdClient(transport=lambda *_: json.dumps(response).encode()))
+        self.assertEqual([v.cve_id for v in result.vulnerabilities], ["CVE-2026-11933"])
+
+    def test_malformed_nvd_configuration_makes_lookup_unknown(self) -> None:
+        response = {"totalResults": 1, "vulnerabilities": [{"cve": {
+            "id": "CVE-2026-00005", "configurations": [{"nodes": None}],
+        }}]}
+        result = check_cpe(self.cpe, client=NvdClient(transport=lambda *_: json.dumps(response).encode()))
+        self.assertEqual(result.status, VulnerabilityStatus.UNKNOWN)
+        self.assertIn("invalid configuration nodes", result.error)
 
     def test_incomplete_page_is_unknown_instead_of_clean(self) -> None:
         response = {
@@ -301,7 +391,13 @@ def nvd_page(cve_ids: list[str], *, total: int, start: int = 0) -> bytes:
             "resultsPerPage": len(cve_ids),
             "startIndex": start,
             "totalResults": total,
-            "vulnerabilities": [{"cve": {"id": cve_id}} for cve_id in cve_ids],
+            "vulnerabilities": [{"cve": {
+                "id": cve_id,
+                "configurations": [{"nodes": [{"operator": "OR", "cpeMatch": [
+                    {"vulnerable": True, "criteria": CpeIdentity("cpe:/a:openbsd:openssh:9.6").value},
+                    {"vulnerable": True, "criteria": CpeIdentity("cpe:/o:linux:linux_kernel:6.1").value},
+                ]}]}],
+            }} for cve_id in cve_ids],
         }
     ).encode()
 
@@ -513,6 +609,8 @@ class ScanVulnerabilityTests(unittest.TestCase):
                 {
                     "cve": {
                         "id": "CVE-2024-6387",
+                        "configurations": direct_nvd_configuration(
+                            CpeIdentity("cpe:/a:openbsd:openssh:9.6").value),
                         "descriptions": [{"lang": "en", "value": "OpenSSH issue."}],
                         "metrics": {},
                         "references": [],
@@ -626,6 +724,8 @@ class ScanVulnerabilityTests(unittest.TestCase):
                 {
                     "cve": {
                         "id": "CVE-2024-6387",
+                        "configurations": direct_nvd_configuration(
+                            CpeIdentity("cpe:/a:openbsd:openssh:9.6").value),
                         "descriptions": [{"lang": "en", "value": "OpenSSH issue."}],
                     }
                 }
@@ -658,7 +758,11 @@ class ScanVulnerabilityTests(unittest.TestCase):
             return json.dumps(
                 {
                     "totalResults": 1,
-                    "vulnerabilities": [{"cve": {"id": "CVE-2026-12345"}}],
+                    "vulnerabilities": [{"cve": {
+                        "id": "CVE-2026-12345",
+                        "configurations": direct_nvd_configuration(
+                            CpeIdentity("cpe:/a:example:service:1.0").value),
+                    }}],
                 }
             ).encode()
 

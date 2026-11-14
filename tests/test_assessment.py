@@ -47,6 +47,20 @@ class AssessmentTests(unittest.TestCase):
         self.assertIn("access: UNVERIFIED", rendered)
         self.assertIn("required credentials", rendered)
 
+    def test_summary_leads_with_target_and_names_failed_cpe(self):
+        other = deepcopy(self.scan)
+        other = json.loads(json.dumps(other).replace("2001:db8::10", "2001:db8::20"))
+        self.cves["checks"][0]["completed"] = False
+        self.cves["checks"][0]["error"] = "NVD request timed out"
+        self.cves["completed"] = False
+        self.cves["coverage"]["services"] = 4
+        rendered = render_assessment(self.summarize([self.scan, other]))
+        self.assertIn("Target services observed: 2", rendered)
+        self.assertIn("Other hosts observed: 1", rendered)
+        target_section = rendered.split("TARGET EXPOSURE", 1)[1].split("OTHER OBSERVED HOSTS", 1)[0]
+        self.assertNotIn("2001:db8::20", target_section)
+        self.assertIn("Lookup failed for " + self.cves["checks"][0]["cpe"], rendered)
+
     def test_open_target_without_cve_has_no_path_but_is_reachable(self):
         self.cves["matches"] = []
         result = self.summarize()
@@ -77,6 +91,23 @@ class AssessmentTests(unittest.TestCase):
                 self.cves.update(change)
                 self.assertFalse(self.summarize()["coverage_complete"])
                 self.cves = original
+
+    def test_stale_cpe_matches_are_excluded_from_routes(self):
+        self.scan["services"][0]["cpes"] = ["cpe:/a:mariadb:mariadb:5.5.5-10.11.14"]
+        result = self.summarize()
+        self.assertFalse(result["coverage_complete"])
+        self.assertGreater(result["excluded_match_count"], 0)
+        self.assertIn("CVE link has no completed check for its current CPE",
+                      result["excluded_match_reasons"])
+        self.assertEqual(len(result["modeled_matches"]), 1)
+
+    def test_coarse_cpe_matches_do_not_create_candidate_path(self):
+        for service in self.scan["services"]:
+            service["cpes"] = ["cpe:/a:samba:samba:4"]
+        result = self.summarize()
+        self.assertIsNone(result["candidate_path"])
+        self.assertEqual(result["excluded_match_count"], 2)
+        self.assertIn("no precise version", render_assessment(result))
 
     def test_empty_scan_never_has_complete_coverage(self):
         self.scan = {"hosts": [], "services": []}

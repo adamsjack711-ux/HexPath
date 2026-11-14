@@ -39,6 +39,17 @@ class CpeIdentityTests(unittest.TestCase):
             "cpe:2.3:a:openbsd:openssh:9.6:*:*:*:*:*:*:*",
         )
 
+    def test_mariadb_handshake_prefix_is_not_used_as_product_version(self) -> None:
+        for raw in (
+            "cpe:/a:mariadb:mariadb:5.5.5-10.11.14",
+            "cpe:2.3:a:mariadb:mariadb:5.5.5-10.11.14:*:*:*:*:*:*:*",
+        ):
+            with self.subTest(raw=raw):
+                self.assertEqual(
+                    CpeIdentity(raw).value,
+                    "cpe:2.3:a:mariadb:mariadb:10.11.14:*:*:*:*:*:*:*",
+                )
+
     def test_rejects_complex_cpe_22_instead_of_guessing(self) -> None:
         with self.assertRaisesRegex(VulnerabilityError, "CPE 2.3"):
             CpeIdentity("cpe:/a:example:product:1.0%2bpatch")
@@ -460,6 +471,41 @@ class NvdPaginationTests(unittest.TestCase):
 
 
 class ScanVulnerabilityTests(unittest.TestCase):
+    def test_coarse_service_version_cannot_generate_ranked_cve_candidates(self) -> None:
+        queried: list[str] = []
+
+        def transport(request, _timeout, _limit):
+            queried.append(request.full_url)
+            return b'{"totalResults":0,"vulnerabilities":[]}'
+
+        document = {"services": [{
+            "id": "service:[2001:db8::10]:tcp:445",
+            "cpes": ["cpe:/a:samba:samba:4"],
+        }]}
+        result = check_scan_document(document, client=NvdClient(transport=transport))
+        self.assertEqual(queried, [])
+        self.assertEqual(result.matches, ())
+        self.assertFalse(result.completed)
+        self.assertEqual(result.status, VulnerabilityStatus.UNKNOWN)
+        self.assertIn("too broad", result.invalid_cpes[0].error)
+
+    def test_mariadb_lookup_uses_product_version_in_request(self) -> None:
+        queried: list[str] = []
+
+        def transport(request, _timeout, _limit):
+            queried.append(request.full_url)
+            return b'{"totalResults":0,"vulnerabilities":[]}'
+
+        document = {"services": [{
+            "id": "service:[2001:db8::10]:tcp:3306",
+            "cpes": ["cpe:/a:mariadb:mariadb:5.5.5-10.11.14"],
+        }]}
+        result = check_scan_document(document, client=NvdClient(transport=transport))
+        self.assertTrue(result.completed)
+        self.assertEqual(len(queried), 1)
+        self.assertIn("10.11.14", queried[0])
+        self.assertNotIn("5.5.5-", queried[0])
+
     def test_links_cpe_findings_to_services_and_reports_coverage_gap(self) -> None:
         response = {
             "totalResults": 1,
@@ -498,7 +544,9 @@ class ScanVulnerabilityTests(unittest.TestCase):
         self.assertEqual(result.vulnerabilities[0].cve_id, "CVE-2024-6387")
         self.assertEqual(result.matches[0].service_id, "service:[2001:db8::10]:tcp:22")
         self.assertEqual(result.matches[0].confidence.value, "medium")
-        self.assertIn("local patch status is unverified", result.matches[0].reason)
+        self.assertEqual(result.matches[0].cpe,
+                         CpeIdentity("cpe:/a:openbsd:openssh:9.6").value)
+        self.assertIn("local patch status must be verified", result.matches[0].reason)
 
     def test_all_services_with_clean_cpes_is_complete_and_clean(self) -> None:
         client = NvdClient(

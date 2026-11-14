@@ -117,6 +117,11 @@ class CpeIdentity:
     def to_dict(self) -> dict[str, str]:
         return {"cpe": self.value}
 
+    @property
+    def precise_version(self) -> bool:
+        version = self.value.split(":")[5]
+        return version not in {"*", "-"} and re.fullmatch(r"\d+", version) is None
+
 
 @dataclass(frozen=True, slots=True)
 class OsvAdvisory:
@@ -623,6 +628,16 @@ def check_scan_documents(
                         InvalidCpe(service_id=service_id, cpe=raw_cpe, error=str(error)),
                     )
                     continue
+                if not identity.precise_version:
+                    invalid_cpes.setdefault(
+                        (service_id, raw_cpe),
+                        InvalidCpe(
+                            service_id=service_id,
+                            cpe=raw_cpe,
+                            error="CPE version is absent or too broad for a reliable CVE lookup",
+                        ),
+                    )
+                    continue
                 if identity not in identities:
                     identities.append(identity)
 
@@ -654,8 +669,8 @@ def check_scan_documents(
                 evidence = Evidence(
                     source="nvd",
                     summary=(
-                        f"NVD reports {vulnerability.cve_id} as applicable to "
-                        f"Nmap CPE {check.cpe.value}"
+                        f"NVD returned {vulnerability.cve_id} for the queried "
+                        f"service CPE {check.cpe.value}; local applicability is unverified"
                     ),
                     level=EvidenceLevel.INFERRED,
                     reference=f"https://nvd.nist.gov/vuln/detail/{vulnerability.cve_id}",
@@ -664,9 +679,10 @@ def check_scan_documents(
                     service_id=service_id,
                     cve_id=vulnerability.cve_id,
                     confidence=Confidence.MEDIUM,
+                    cpe=check.cpe.value,
                     reason=(
-                        "The service CPE reported by Nmap matches an NVD "
-                        "applicability statement; local patch status is unverified."
+                        "NVD returned this CVE for the service CPE. Version, modules, "
+                        "configuration, and local patch status must be verified."
                     ),
                     evidence=(evidence,),
                 )
@@ -911,7 +927,7 @@ def _normalize_cpe(value: str) -> str:
         parts = cpe.split(":")
         if len(parts) != 13 or parts[2] not in {"a", "h", "o"}:
             raise VulnerabilityError("cpe must be a well-formed CPE 2.3 name")
-        return cpe
+        return _normalize_mariadb_version(parts)
     if not cpe.startswith("cpe:/"):
         raise VulnerabilityError("cpe must use CPE 2.2 URI or CPE 2.3 syntax")
 
@@ -926,4 +942,14 @@ def _normalize_cpe(value: str) -> str:
     parts.extend([""] * (7 - len(parts)))
     normalized = [part if part else "*" for part in parts]
     normalized.extend(["*"] * 4)
-    return "cpe:2.3:" + ":".join(normalized)
+    return _normalize_mariadb_version(("cpe", "2.3", *normalized))
+
+
+def _normalize_mariadb_version(parts: tuple[str, ...] | list[str]) -> str:
+    """Remove MariaDB's compatibility handshake prefix from a versioned CPE."""
+    normalized = list(parts)
+    if normalized[3:5] == ["mariadb", "mariadb"]:
+        match = re.fullmatch(r"5\.5\.5-(\d+\.\d+\.\d+)", normalized[5])
+        if match:
+            normalized[5] = match.group(1)
+    return ":".join(normalized)

@@ -298,6 +298,7 @@ class VulnerabilityMatch:
     confidence: Confidence
     reason: str
     evidence: tuple[Evidence, ...]
+    cpe: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -316,13 +317,15 @@ class VulnerabilityMatch:
         if not evidence:
             raise ModelError("a vulnerability match must include supporting evidence")
         object.__setattr__(self, "evidence", evidence)
+        if self.cpe is not None:
+            object.__setattr__(self, "cpe", _require_text(self.cpe, "cpe"))
 
     @property
     def record_id(self) -> str:
         return f"match:{self.service_id}:{self.cve_id}"
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "id": self.record_id,
             "service_id": self.service_id,
             "cve_id": self.cve_id,
@@ -330,6 +333,9 @@ class VulnerabilityMatch:
             "reason": self.reason,
             "evidence": [item.to_dict() for item in self.evidence],
         }
+        if self.cpe is not None:
+            result["cpe"] = self.cpe
+        return result
 
 
 @dataclass(frozen=True, slots=True)

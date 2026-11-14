@@ -56,15 +56,25 @@ def summarize_assessment(
     """Keep observed exposure separate from hypothetical compromise transitions."""
     if not isinstance(cves, dict):
         raise ValueError("CVE results must be an object")
-    graph = build_attack_graph(scans, cves)
-    node_ids = {node.node_id for node in graph.nodes}
-    if source not in node_ids:
-        raise ValueError(f"source {source!r} has no recorded observations")
-    path = graph.shortest_path(source, target) if target in node_ids else None
+    coverage = cves.get("coverage", {})
+    checks = cves.get("checks", [])
+    if not isinstance(coverage, dict) or not isinstance(checks, list) or any(
+        not isinstance(check, dict) for check in checks
+    ):
+        raise ValueError("CVE coverage must be an object and checks a list of objects")
+    if any(not isinstance(check.get("cpe"), str) for check in checks):
+        raise ValueError("each CVE check must identify its CPE")
     observations = [
         {**service, "vantage": scan["vantage"]}
         for scan in scans for service in scan["services"]
     ]
+    modeled_matches, excluded_reasons = _modeled_matches(observations, cves, checks)
+    graph_cves = {**cves, "matches": modeled_matches}
+    graph = build_attack_graph(scans, graph_cves)
+    node_ids = {node.node_id for node in graph.nodes}
+    if source not in node_ids:
+        raise ValueError(f"source {source!r} has no recorded observations")
+    path = graph.shortest_path(source, target) if target in node_ids else None
     target_address = target.removeprefix("host:")
     direct = any(
         item["vantage"] == source and item["host"] == target_address
@@ -82,14 +92,6 @@ def summarize_assessment(
                     if candidate else "Confirm this observation is still current from the recorded vantage."
                 ),
             })
-    coverage = cves.get("coverage", {})
-    checks = cves.get("checks", [])
-    if not isinstance(coverage, dict) or not isinstance(checks, list) or any(
-        not isinstance(check, dict) for check in checks
-    ):
-        raise ValueError("CVE coverage must be an object and checks a list of objects")
-    if any(not isinstance(check.get("cpe"), str) for check in checks):
-        raise ValueError("each CVE check must identify its CPE")
     service_ids = {item["id"] for item in observations}
     expected_cpes = {cpe for item in observations for cpe in item.get("cpes", [])}
     # A bare completed flag, or enrichment for a different scan set, is not coverage.
@@ -115,6 +117,9 @@ def summarize_assessment(
         "coverage_complete": complete,
         "coverage": coverage,
         "observations": observations,
+        "modeled_matches": modeled_matches,
+        "excluded_match_count": sum(excluded_reasons.values()),
+        "excluded_match_reasons": excluded_reasons,
         "candidate_path": None if path is None else {
             "nodes": list(path.nodes), "total_cost": path.total_weight, "steps": steps,
         },
@@ -128,27 +133,99 @@ def summarize_assessment(
     }
 
 
+def _modeled_matches(
+    observations: list[dict[str, Any]], cves: dict[str, Any], checks: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Keep stale or broad CPE links out of candidate routes."""
+    service_cpes: dict[str, set[str]] = {}
+    for service in observations:
+        identities = service_cpes.setdefault(service["id"], set())
+        for raw_cpe in service.get("cpes", []):
+            try:
+                identity = CpeIdentity(raw_cpe)
+            except VulnerabilityError:
+                continue
+            if identity.precise_version:
+                identities.add(identity.value)
+    completed = {check["cpe"] for check in checks if check.get("completed") is True}
+    matches = cves.get("matches", [])
+    if not isinstance(matches, list):
+        raise ValueError("CVE matches must be a list")
+    modeled: list[dict[str, Any]] = []
+    excluded: dict[str, int] = {}
+    for match in matches:
+        if not isinstance(match, dict):
+            raise ValueError("CVE matches must contain objects")
+        service_id = match.get("service_id")
+        if service_id not in service_cpes:
+            modeled.append(match)  # Let graph validation report an unknown service.
+            continue
+        candidates = service_cpes[service_id]
+        cpe = match.get("cpe")
+        if cpe is None and len(candidates) == 1:
+            cpe = next(iter(candidates))  # Legacy evidence with one precise identity.
+        if not candidates:
+            reason = "service has no precise version CPE"
+        elif not isinstance(cpe, str) or cpe not in candidates:
+            reason = "CVE link has no attributable matching CPE"
+        elif cpe not in completed:
+            reason = "CVE link has no completed check for its current CPE"
+        else:
+            modeled.append(match)
+            continue
+        excluded[reason] = excluded.get(reason, 0) + 1
+    return modeled, excluded
+
+
 def render_assessment(document: dict[str, Any]) -> str:
     """Render a plain-text CLI summary without trusting terminal control bytes."""
+    observations = document["observations"]
+    target_address = document["target"].removeprefix("host:")
+    target_services = [item for item in observations if item["host"] == target_address]
+    other_hosts: dict[str, set[str]] = {}
+    for item in observations:
+        if item["host"] != target_address:
+            other_hosts.setdefault(item["host"], set()).add(item["id"])
+    target_ids = {item["id"] for item in target_services}
+    matches = document["modeled_matches"]
+    target_candidates = {
+        match["cve_id"] for match in matches
+        if isinstance(match, dict) and match.get("service_id") in target_ids
+        and isinstance(match.get("cve_id"), str)
+    }
+    checks = document["cves"].get("checks", [])
+    completed_checks = sum(check.get("completed") is True for check in checks)
     lines = [
         "HexPath IPv6 Pentest Assessment", "===============================",
         f"Scope: {document['scope']['name']}",
         f"Starting point: {document['source']}", f"Objective: {document['target']}",
-        "", "OBSERVED EXPOSURE",
+        "", "AT A GLANCE",
+        f"  Target services observed: {len(target_ids)}",
+        f"  Other hosts observed: {len(other_hosts)}",
+        f"  Target CVE candidates: {len(target_candidates)} (not verified vulnerabilities)",
+        f"  NVD CPE checks completed: {completed_checks}/{len(checks)}",
+        f"  CVE links excluded from routes: {document['excluded_match_count']}",
+        "", "TARGET EXPOSURE",
     ]
-    for item in document["observations"]:
+    for item in target_services:
         lines.append(
             f"  {item['vantage']} -> [{item['host']}]:{item.get('port')}"
             f"/{item.get('protocol')}  {item.get('state')}  "
             f"{item.get('product') or item.get('name') or 'unknown service'} "
             f"{item.get('version') or ''}"
         )
-    if not document["observations"]:
-        lines.append("  No services recorded; exposure is unknown.")
+    if not target_services:
+        lines.append("  No target services recorded; exposure is unknown.")
     if document["target_service_reachable_from_source"]:
         lines.append("  An open target service was observed from the starting point.")
     elif not document["target_observed"]:
         lines.append("  The target was not observed in these scans.")
+    lines.extend(["", "OTHER OBSERVED HOSTS"])
+    if other_hosts:
+        for host, service_ids in sorted(other_hosts.items()):
+            lines.append(f"  {host}: {len(service_ids)} service(s); full evidence is in assessment JSON")
+    else:
+        lines.append("  None recorded.")
     lines.extend(["", "CANDIDATE PATH TO OBJECTIVE"])
     path = document["candidate_path"]
     if path is None:
@@ -176,9 +253,15 @@ def render_assessment(document: dict[str, Any]) -> str:
         "complete for supplied service identities" if document["coverage_complete"]
         else "INCOMPLETE / UNKNOWN - unresolved checks remain"
     ))
-    for check in document["cves"].get("checks", []):
+    for reason, count in document["excluded_match_reasons"].items():
+        lines.append(f"  {count} CVE link(s) excluded: {reason}.")
+    for check in checks:
         if check.get("error"):
-            lines.append(f"  Lookup error: {check['error']}")
+            lines.append(f"  Lookup failed for {check['cpe']}: {check['error']}")
+    for item in document["cves"].get("invalid_cpes", []):
+        lines.append(f"  Unchecked CPE on {item['service_id']}: {item['cpe']} ({item['error']})")
+    for service_id in document["cves"].get("unmatched_services", []):
+        lines.append(f"  No CPE for {service_id}; CVE lookup unavailable.")
     lines.extend(f"  {item}" for item in document["limitations"])
     return "\n".join(
         "".join(c if c.isprintable() else "?" for c in line) for line in lines

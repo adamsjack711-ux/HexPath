@@ -33,10 +33,15 @@ hexpath assess --scope examples/lab-scope.example.json \
 
 This runs IPv6 service detection, enriches the results through NVD, and prints:
 
-- **Observed exposure:** services and their recorded scan origins.
+- **At a glance:** target service count, other observed hosts, CVE candidate count,
+  and completed NVD checks.
+- **Target exposure:** the objective's services and their recorded scan origins.
+- **Other observed hosts:** a compact host inventory; the JSON bundle retains
+  every service and its evidence.
 - **Candidate path to objective:** the lowest-cost modeled route, with every
   potential compromise labeled `access: UNVERIFIED` and a concrete next check.
-- **Coverage and limitations:** incomplete CVE checks and the limits of the evidence.
+- **Coverage and limitations:** failed checks named by CPE, services without a
+  CPE, and the limits of the evidence.
 
 `--output` saves the scans, CVE results, graph, scope, and assessment together
 as JSON while keeping the terminal summary visible. `--json` prints the bundle
@@ -73,6 +78,14 @@ observed even when there is no candidate path. Closed, filtered, and
 reachability. A candidate CVE does not prove access; the tester must check
 applicability, credentials, exploit conditions, and resulting privileges.
 Costs prioritize investigation and do not measure exploit success probability.
+NVD returns investigation candidates, and local version, patch, module, and
+configuration evidence is still needed before calling a host vulnerable.
+HexPath removes MariaDB's `5.5.5-` compatibility prefix from its NVD query
+identity. Missing versions and single-number versions such as `Samba 4` are
+reported as incomplete coverage instead of producing broad CVE associations.
+Saved CVE links also need a completed check for the service's current precise
+CPE before they can form a candidate route. The assessment JSON retains the
+original links and reports how many were excluded from the model.
 
 Try the fully synthetic offline example without Nmap or API requests:
 

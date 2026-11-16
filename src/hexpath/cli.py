@@ -52,6 +52,7 @@ from hexpath.vulnerabilities import (
     check_package,
     check_scan_documents,
 )
+from hexpath.version_evidence import confirm_mongodb_build_info, read_zgrab2_jsonl
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -256,6 +257,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="entry:scanner or the authorized host:<IP> running this scan",
     )
     run_parser.add_argument("targets", nargs="+", help="authorized IP addresses or CIDRs")
+
+    confirm_parser = scan_commands.add_parser(
+        "confirm-mongodb", help="merge a scoped ZGrab2 MongoDB buildInfo result into saved scan JSON",
+    )
+    confirm_parser.set_defaults(scan_command="confirm-mongodb")
+    confirm_parser.add_argument("--scope", required=True, help="authorized IPv6 scope JSON")
+    confirm_parser.add_argument("--input", required=True, help="saved HexPath scan JSON")
+    confirm_parser.add_argument("--zgrab2", required=True, help="saved ZGrab2 MongoDB JSONL")
+    confirm_parser.add_argument("--output", help="write confirmed scan JSON to this path")
 
     cve_parser = subcommands.add_parser(
         "cve",
@@ -700,6 +710,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 vantage=vantage,
             )
             print(result.to_json())
+            return 0
+        if args.command == "scan" and args.scan_command == "confirm-mongodb":
+            scope = Scope.from_json_file(args.scope)
+            scan = _read_json_document(args.input, "scan")
+            rows = read_zgrab2_jsonl(args.zgrab2)
+            confirmed = confirm_mongodb_build_info(
+                scope, scan, rows, reference=args.zgrab2,
+            )
+            serialized = json.dumps(confirmed, indent=2, sort_keys=True)
+            if args.output:
+                Path(args.output).write_text(serialized + "\n", encoding="utf-8")
+            else:
+                print(serialized)
             return 0
         if args.command == "cve" and args.cve_command == "package":
             package = PackageIdentity(

@@ -74,6 +74,24 @@ enrichment for the saved scans. Saved CVE results cannot be paired with new
 live targets. For a live assessment already running from another host, use
 `--from 2001:db8:1::10`; this records the origin and does not execute remotely.
 
+When a scoped ZGrab2 MongoDB probe supplies an exact `buildInfo.version`, merge
+its saved JSONL result into a **copy** of the saved HexPath scan:
+
+```sh
+hexpath scan confirm-mongodb --scope scope.json --input scan.json \
+  --zgrab2 mongodb.jsonl --output confirmed-scan.json
+hexpath cve scan --input confirmed-scan.json > confirmed-cves.json
+hexpath assess --scope scope.json --scan confirmed-scan.json \
+  --cves confirmed-cves.json --target 2001:db8:1::20
+```
+
+The import checks the probe address against scope, requires a matching open
+MongoDB TCP service, and records ZGrab2's source, time, and file reference. It
+retains the original Nmap identity and displays any version difference in the
+target summary. A protocol version or a failed probe cannot supply a software
+version. Run the ZGrab2 probe only on the authorized host and port; this command
+imports a saved result and does not contact the target.
+
 Reachability and compromise are separate: an open target service can be
 observed even when there is no supported access path. Closed, filtered, and
 `open|filtered` ports remain in the observations but cannot establish graph

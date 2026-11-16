@@ -246,6 +246,16 @@ def render_assessment(document: dict[str, Any]) -> str:
             f"{item.get('product') or item.get('name') or 'unknown service'} "
             f"{item.get('version') or ''}"
         )
+        confirmation = item.get("version_confirmation")
+        original = item.get("original_identity")
+        if isinstance(confirmation, dict) and isinstance(original, dict):
+            previous = original.get("version") or "unversioned"
+            lines.append(
+                f"    Version confirmed by {confirmation.get('source', 'protocol probe')}: "
+                f"{confirmation.get('version', 'unknown')} "
+                f"(original scan: {previous}; "
+                f"{confirmation.get('reference', 'reference unavailable')})"
+            )
     if not target_services:
         lines.append("  No target services recorded; exposure is unknown.")
     if document["target_service_reachable_from_source"]:

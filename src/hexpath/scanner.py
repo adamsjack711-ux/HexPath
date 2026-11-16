@@ -494,17 +494,22 @@ def _parse_os_fingerprint(
     if os_element is None:
         return None, ()
 
-    # osmatch elements are ordered by Nmap from highest to lowest accuracy, so
-    # the first one is the best guess for a human-readable name.
+    # osmatch elements are ordered by Nmap from highest to lowest accuracy. Use
+    # only the best match for both the name and the CPEs: taking CPEs from every
+    # candidate would attach several mutually exclusive operating systems (for
+    # example windows_xp and windows_7) to one host and inflate the candidate
+    # CVE set with OSes the host is not. Fall back to any CPEs directly under
+    # <os> if Nmap emitted no osmatch wrapper.
     os_name: str | None = None
-    first_match = os_element.find("osmatch")
-    if first_match is not None:
-        candidate = first_match.attrib.get("name")
+    best_match = os_element.find("osmatch")
+    cpe_source = best_match if best_match is not None else os_element
+    if best_match is not None:
+        candidate = best_match.attrib.get("name")
         if candidate and candidate.strip():
             os_name = candidate.strip()
 
     cpes: list[str] = []
-    for cpe_element in os_element.findall(".//cpe"):
+    for cpe_element in cpe_source.findall(".//cpe"):
         if cpe_element.text is None:
             continue
         value = cpe_element.text.strip()

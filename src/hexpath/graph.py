@@ -1121,8 +1121,6 @@ def build_attack_graph(
         )
 
     return AttackGraph(nodes=tuple(nodes), edges=tuple(edges))
-
-
 def render_attack_graph_ascii(
     graph: AttackGraph,
     *,

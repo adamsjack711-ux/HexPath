@@ -171,6 +171,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--ports",
         help="ports or ranges for the services profile, such as 22,80,443 or 1-1024",
     )
+    plan_parser.add_argument(
+        "-O",
+        "--os-detection",
+        dest="os_detection",
+        action="store_true",
+        help="add Nmap OS detection (-O); needs elevated privileges to run",
+    )
     plan_family = plan_parser.add_mutually_exclusive_group()
     plan_family.add_argument(
         "-4",
@@ -227,6 +234,13 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         "--ports",
         help="ports or ranges for the services profile, such as 22,80,443 or 1-1024",
+    )
+    run_parser.add_argument(
+        "-O",
+        "--os-detection",
+        dest="os_detection",
+        action="store_true",
+        help="add Nmap OS detection (-O); needs elevated privileges to run",
     )
     run_family = run_parser.add_mutually_exclusive_group()
     run_family.add_argument(
@@ -694,6 +708,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 skip_discovery=args.skip_discovery,
                 ports=args.ports,
                 ip_version=args.ip_version,
+                os_detection=args.os_detection,
             )
             print(shlex.join(command.arguments))
             return 0
@@ -707,6 +722,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 skip_discovery=args.skip_discovery,
                 ports=args.ports,
                 ip_version=args.ip_version,
+                os_detection=args.os_detection,
             )
             xml_output = run_nmap(command, timeout_seconds=args.timeout)
             result = parse_nmap_xml(

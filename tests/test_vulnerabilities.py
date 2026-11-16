@@ -646,6 +646,51 @@ class ScanVulnerabilityTests(unittest.TestCase):
                          CpeIdentity("cpe:/a:openbsd:openssh:9.6").value)
         self.assertIn("local patch status must be verified", result.matches[0].reason)
 
+    def test_host_os_cpes_are_checked_as_low_confidence_os_findings(self) -> None:
+        response = {
+            "totalResults": 1,
+            "vulnerabilities": [{"cve": {"id": "CVE-2008-4250"}}],
+        }
+        client = NvdClient(
+            transport=lambda _request, _timeout, _limit: json.dumps(response).encode()
+        )
+        document = {
+            "hosts": [
+                {
+                    "id": "host:192.168.56.101",
+                    "address": "192.168.56.101",
+                    "os_name": "Microsoft Windows XP SP3",
+                    "cpes": ["cpe:/o:microsoft:windows_xp"],
+                }
+            ],
+            "services": [
+                {"id": "service:[192.168.56.101]:tcp:445", "cpes": []},
+            ],
+        }
+
+        result = check_scan_document(document, client=client)
+
+        self.assertEqual(result.status, VulnerabilityStatus.VULNERABLE)
+        os_matches = [m for m in result.matches if m.service_id.startswith("os:[")]
+        self.assertEqual(len(os_matches), 1)
+        self.assertEqual(os_matches[0].service_id, "os:[192.168.56.101]")
+        self.assertEqual(os_matches[0].cve_id, "CVE-2008-4250")
+        self.assertEqual(os_matches[0].confidence.value, "low")
+        self.assertIn("no patch level", os_matches[0].reason)
+
+    def test_host_without_os_cpes_adds_no_os_finding(self) -> None:
+        client = NvdClient(
+            transport=lambda _request, _timeout, _limit: b'{"totalResults":0,"vulnerabilities":[]}'
+        )
+        document = {
+            "hosts": [{"id": "host:192.168.56.104", "address": "192.168.56.104"}],
+            "services": [{"id": "service:[192.168.56.104]:tcp:445", "cpes": []}],
+        }
+
+        result = check_scan_document(document, client=client)
+
+        self.assertFalse(any(m.service_id.startswith("os:[") for m in result.matches))
+
     def test_all_services_with_clean_cpes_is_complete_and_clean(self) -> None:
         client = NvdClient(
             transport=lambda _request, _timeout, _limit: b'{"totalResults":0,"vulnerabilities":[]}'

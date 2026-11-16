@@ -1260,5 +1260,89 @@ class DeepGraphRenderingTests(unittest.TestCase):
             render_attack_graph_ascii(chain_graph(1), max_depth=0)
 
 
+class OsFindingGraphTests(unittest.TestCase):
+    def _os_scan_and_cves(self) -> tuple[dict, dict]:
+        observed = evidence().to_dict()
+        inferred = Evidence(
+            source="nvd",
+            summary="OS CPE applicability match",
+            level=EvidenceLevel.INFERRED,
+            collected_at=COLLECTED_AT,
+            reference="https://nvd.nist.gov/vuln/detail/CVE-2008-4250",
+        ).to_dict()
+        scan = {
+            "hosts": [
+                {
+                    "id": "host:192.168.56.101",
+                    "address": "192.168.56.101",
+                    "hostnames": [],
+                    "os_name": "Microsoft Windows XP SP3",
+                    "cpes": ["cpe:/o:microsoft:windows_xp"],
+                    "evidence": [observed],
+                }
+            ],
+            "services": [
+                {
+                    "id": "service:[192.168.56.101]:tcp:445",
+                    "host": "192.168.56.101",
+                    "port": 445,
+                    "protocol": "tcp",
+                    "state": "open",
+                    "name": "microsoft-ds",
+                    "cpes": [],
+                    "evidence": [observed],
+                }
+            ],
+        }
+        cves = {
+            "vulnerabilities": [
+                {"id": "CVE-2008-4250", "cvss_score": 10.0, "references": []}
+            ],
+            "matches": [
+                {
+                    "service_id": "os:[192.168.56.101]",
+                    "cve_id": "CVE-2008-4250",
+                    "confidence": "low",
+                    "reason": "OS CPE candidate; no patch level.",
+                    "evidence": [inferred],
+                }
+            ],
+        }
+        return scan, cves
+
+    def test_os_finding_makes_a_versionless_host_scorable(self) -> None:
+        scan, cves = self._os_scan_and_cves()
+        graph = build_attack_graph(scan, cves)
+
+        # The synthetic OS node is reachable from the entry and leads to the host.
+        os_nodes = [n for n in graph.nodes if n.node_id == "os:[192.168.56.101]"]
+        self.assertEqual(len(os_nodes), 1)
+        self.assertEqual(os_nodes[0].kind, NodeKind.SERVICE)
+        self.assertIn("Windows XP", os_nodes[0].label)
+
+        score = graph.host_exposure(ENTRY_NODE_ID, "host:192.168.56.101")
+        self.assertGreater(score.network_score, 0.0)
+        self.assertEqual(score.observations["exploit_edges"], 1)
+
+        path = graph.shortest_path(ENTRY_NODE_ID, "host:192.168.56.101")
+        self.assertEqual(
+            path.nodes,
+            (ENTRY_NODE_ID, "os:[192.168.56.101]", "host:192.168.56.101"),
+        )
+        self.assertEqual(path.edges[-1].metadata["confidence"], "low")
+
+    def test_os_match_for_unknown_host_is_rejected(self) -> None:
+        scan, cves = self._os_scan_and_cves()
+        cves["matches"][0]["service_id"] = "os:[203.0.113.9]"
+        with self.assertRaisesRegex(GraphError, "unknown host"):
+            build_attack_graph(scan, cves)
+
+    def test_malformed_os_finding_identifier_is_rejected(self) -> None:
+        scan, cves = self._os_scan_and_cves()
+        cves["matches"][0]["service_id"] = "os:[]"
+        with self.assertRaisesRegex(GraphError, "unknown service|malformed OS finding"):
+            build_attack_graph(scan, cves)
+
+
 if __name__ == "__main__":
     unittest.main()

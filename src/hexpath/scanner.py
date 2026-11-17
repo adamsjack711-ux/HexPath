@@ -46,6 +46,7 @@ class NmapParseError(ScannerError):
 class ScanProfile(StrEnum):
     """Supported Nmap scan profiles."""
 
+    BASIC = "basic"
     DISCOVERY = "discovery"
     QUICK = "quick"
     SERVICES = "services"
@@ -208,14 +209,15 @@ def build_nmap_command(
         "-",
     )
     profile_arguments = {
+        ScanProfile.BASIC: ("-sT",),
         ScanProfile.DISCOVERY: ("-sn",),
         ScanProfile.QUICK: ("-sT", "--top-ports", "100"),
         ScanProfile.SERVICES: ("-sT", "-sV", "--version-light"),
         ScanProfile.FULL: ("-sT", "-sV", "--version-light", "-p-"),
         ScanProfile.DEEP: ("-sT", "-sV", "--version-all", "-p-"),
     }[selected_profile]
-    if ports is not None and selected_profile is not ScanProfile.SERVICES:
-        raise ScannerError("ports can be selected only with the services profile")
+    if ports is not None and selected_profile not in (ScanProfile.BASIC, ScanProfile.SERVICES):
+        raise ScannerError("ports can be selected only with the basic or services profile")
 
     discovery_arguments = ("-Pn",) if skip_discovery else ()
     port_arguments = ("-p", _validate_ports(ports)) if ports is not None else ()

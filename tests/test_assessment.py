@@ -68,6 +68,42 @@ class AssessmentTests(unittest.TestCase):
         self.assertIsNone(result["candidate_path"])
         self.assertIn("does not mean secure", render_assessment(result))
 
+    def test_next_checks_identify_unverified_candidates_without_inventing_a_path(self):
+        for match in self.cves["matches"]:
+            match.pop("access_supported")
+            match.pop("access_basis")
+            match.pop("access_evidence")
+        result = self.summarize()
+        self.assertIsNone(result["candidate_path"])
+        self.assertEqual(
+            [item["kind"] for item in result["next_checks"]],
+            ["verify_cve_conditions", "verify_cve_conditions", "record_probe_coverage"],
+        )
+        rendered = render_assessment(result)
+        self.assertIn("NEXT CHECKS FOR TARGET", rendered)
+        self.assertIn("[2001:db8::10]:22/tcp", rendered)
+        self.assertIn("observed access effect before asserting a path", rendered)
+
+    def test_next_checks_separate_missing_version_from_failed_lookup(self):
+        self.scan["services"][0]["cpes"] = ["cpe:/a:openbsd:openssh"]
+        self.cves["checks"][1]["completed"] = False
+        self.cves["checks"][1]["error"] = "NVD unavailable"
+        result = self.summarize()
+        self.assertEqual(
+            [item["kind"] for item in result["next_checks"]],
+            ["confirm_version", "complete_cve_lookup", "record_probe_coverage"],
+        )
+        self.assertIn("[2001:db8::10]:22/tcp", result["next_checks"][0]["action"])
+        self.assertIn("example:http:1.0", result["next_checks"][1]["cpe"])
+
+    def test_next_checks_do_not_treat_unobserved_ipv6_host_as_clean(self):
+        result = self.summarize(target="host:2001:db8::99")
+        self.assertEqual(
+            [item["kind"] for item in result["next_checks"]],
+            ["confirm_reachability", "record_probe_coverage"],
+        )
+        self.assertIn("target was not observed", result["next_checks"][0]["action"])
+
     def test_closed_or_uncertain_services_cannot_form_routes(self):
         for state in ("closed", "filtered", "open|filtered", "unknown"):
             with self.subTest(state=state):

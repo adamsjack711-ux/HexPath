@@ -53,6 +53,14 @@ an error; finding a candidate CVE does not itself cause a failure exit status.
 Complete coverage describes the supplied software identities, not proof that
 the network is secure.
 
+The assessment includes `next_checks` in JSON and a **NEXT CHECKS FOR TARGET**
+section in the terminal summary. These actions are tied to the selected IPv6
+target: confirm an exact version when its CPE is broad, complete a failed CVE
+lookup, review candidate CVE conditions and access effects, or recheck an
+unobserved target. It also asks the operator to record which IPv6 addresses,
+ports, protocols, and scan vantage were actually tested. Saved service
+observations alone do not establish full scan coverage.
+
 The assessment command accepts explicit host seeds, not subnet sweeps. It does
 not enumerate an IPv6 prefix or claim complete host discovery. The existing
 scope rules exclude link-local, multicast, and IPv4-mapped ranges; these are

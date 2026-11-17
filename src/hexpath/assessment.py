@@ -109,6 +109,10 @@ def summarize_assessment(
                 and check.get("status") != "unknown" for check in checks)
         and not cves.get("unmatched_services") and not cves.get("invalid_cpes")
     )
+    next_checks = _next_checks(
+        observations, modeled_matches, checks, target_address=target_address,
+        source=source, target_observed=target in node_ids,
+    )
     return {
         "schema_version": "hexpath-ipv6-assessment-v2",
         "scope": {"name": scope.name, "targets": [str(n) for n in scope.networks]},
@@ -124,6 +128,7 @@ def summarize_assessment(
         "candidate_path": None if path is None else {
             "nodes": list(path.nodes), "total_cost": path.total_weight, "steps": steps,
         },
+        "next_checks": next_checks,
         "limitations": [
             "CVE matches are investigation candidates, not confirmed compromise.",
             "CVE matches do not create access paths without observed access-effect evidence.",
@@ -192,6 +197,87 @@ def _modeled_matches(
             continue
         excluded[reason] = excluded.get(reason, 0) + 1
     return modeled, excluded
+
+
+def _next_checks(
+    observations: list[dict[str, Any]], matches: list[dict[str, Any]],
+    checks: list[dict[str, Any]], *, target_address: str, source: str,
+    target_observed: bool,
+) -> list[dict[str, Any]]:
+    """Turn target-specific evidence gaps into ordered, bounded follow-ups."""
+    actions: list[dict[str, Any]] = []
+    services = {
+        item["id"]: item for item in observations
+        if item["host"] == target_address and item.get("state") == "open"
+    }
+    completed_cpes = {
+        check.get("cpe") for check in checks
+        if check.get("completed") is True
+        and check.get("screening_complete") is not False
+        and check.get("status") != "unknown"
+    }
+    for service_id, service in sorted(services.items()):
+        endpoint = (
+            f"[{target_address}]:{service.get('port')}/{service.get('protocol')}"
+        )
+        precise_cpes: set[str] = set()
+        for raw_cpe in service.get("cpes", []):
+            try:
+                cpe = CpeIdentity(raw_cpe)
+            except VulnerabilityError:
+                continue
+            if cpe.precise_version:
+                precise_cpes.add(cpe.value)
+        if not precise_cpes:
+            actions.append({
+                "kind": "confirm_version", "service_id": service_id,
+                "action": (
+                    f"Confirm the exact software version on {endpoint} using an "
+                    "authorized protocol query or trusted inventory before CVE lookup."
+                ),
+            })
+        else:
+            for cpe in sorted(precise_cpes - completed_cpes):
+                actions.append({
+                    "kind": "complete_cve_lookup", "service_id": service_id,
+                    "cpe": cpe,
+                    "action": f"Complete the CVE lookup for {cpe} on {endpoint}.",
+                })
+        unverified = sorted({
+            match["cve_id"] for match in matches
+            if match.get("service_id") == service_id
+            and match.get("access_supported") is not True
+            and isinstance(match.get("cve_id"), str)
+        })
+        if unverified:
+            actions.append({
+                "kind": "verify_cve_conditions", "service_id": service_id,
+                "cve_ids": unverified,
+                "action": (
+                    f"Review applicability and required configuration for "
+                    f"{len(unverified)} CVE candidate(s) on {endpoint}; record an "
+                    "observed access effect before asserting a path."
+                ),
+            })
+    if not services:
+        actions.append({
+            "kind": "confirm_reachability", "service_id": None,
+            "action": (
+                f"Recheck the authorized IPv6 target {target_address} from {source}; "
+                "no open target service was recorded."
+                if target_observed else
+                f"Confirm the IPv6 target seed {target_address} and scan vantage {source}; "
+                "the target was not observed."
+            ),
+        })
+    actions.append({
+        "kind": "record_probe_coverage", "service_id": None,
+        "action": (
+            f"Record the IPv6 addresses, TCP/UDP ports, and vantage actually tested "
+            f"from {source}; observed services do not establish full scan coverage."
+        ),
+    })
+    return actions
 
 
 def render_assessment(document: dict[str, Any]) -> str:
@@ -306,6 +392,9 @@ def render_assessment(document: dict[str, Any]) -> str:
                     f"{evidence['collected_at']}"
                     + (f" / {evidence['reference']}" if evidence.get("reference") else "")
                 )
+    lines.extend(["", "NEXT CHECKS FOR TARGET"])
+    for index, item in enumerate(document.get("next_checks", []), 1):
+        lines.append(f"  {index}. {item['action']}")
     lines.extend(["", "COVERAGE AND LIMITATIONS"])
     lines.append("  CVE lookup coverage: " + (
         "complete for supplied service identities" if document["coverage_complete"]

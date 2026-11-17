@@ -128,7 +128,7 @@ def summarize_assessment(
         observations, modeled_matches, checks, target_address=target_address,
         source=source, target_observed=target in node_ids,
     )
-    host_information = _host_information_grade(
+    host_information = grade_host_information(
         scans, observations, checks, target_address=target_address,
     )
     return {
@@ -218,7 +218,7 @@ def _modeled_matches(
     return modeled, excluded
 
 
-def _host_information_grade(
+def grade_host_information(
     scans: list[dict[str, Any]], observations: list[dict[str, Any]],
     checks: list[dict[str, Any]], *, target_address: str,
 ) -> dict[str, Any]:
@@ -475,6 +475,8 @@ def render_assessment(document: dict[str, Any]) -> str:
                 + (f" ({accuracy}% Nmap accuracy)" if accuracy is not None else "")
                 + f" from {guess.get('vantage')}; patch level unverified."
             )
+            if guess.get("cpes"):
+                lines.append("    OS CPEs (broad): " + ", ".join(guess["cpes"]))
     else:
         lines.append("  OS fingerprint: not recorded for this target.")
     lines.extend(["", "OTHER OBSERVED HOSTS"])

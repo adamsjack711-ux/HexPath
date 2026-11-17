@@ -2,26 +2,26 @@
 
 An IPv6-focused network penetration-testing tool for lab practice and authorized engagements.
 
-HexPath helps a network pentester answer: **from my current position, what is exposed over IPv6, and which potential path toward my target should I investigate?** It connects scoped service discovery, CVE candidates, and observations from multiple scan origins into an evidence-backed CLI assessment. This is our school group project; modeled paths guide investigation and do not establish successful exploitation.
+HexPath helps a tester answer: **what did an IPv6 scan actually find, how complete is the host information, and what should I check next?** It presents scoped service observations, version evidence, CVE candidates, and an information grade with its supporting counts. This is our school group project. Optional path tools guide investigation and do not establish successful exploitation.
 
 ## Quick start
 
 Run HexPath directly against a target you are authorized to test:
 
 ```sh
-hexpath 192.0.2.10
+hexpath 2001:db8::10
 ```
 
 This checks Nmap's 1,000 most common TCP ports and prints a readable summary.
 Add only the information you need; flags can go before or after the target:
 
 ```sh
-hexpath 192.0.2.10 -sV                 # service versions
-hexpath 192.0.2.10 -O                  # OS fingerprint (needs privileges)
-hexpath 192.0.2.10 --cves              # versions plus NVD CVE candidates
-hexpath 192.0.2.10 -p 22,80,443        # selected ports
-hexpath 192.0.2.10 -sV -p-             # versions on all TCP ports
-hexpath 192.0.2.10 -Pn                # target is online but discovery fails
+hexpath 2001:db8::10 -sV               # service versions
+hexpath 2001:db8::10 -O                # OS fingerprint (needs privileges)
+hexpath 2001:db8::10 --cves            # versions plus NVD CVE candidates
+hexpath 2001:db8::10 -p 22,80,443      # selected ports
+hexpath 2001:db8::10 -sV -p-           # versions on all TCP ports
+hexpath 2001:db8::10 -Pn               # target is online but discovery fails
 hexpath 2001:db8::10 -sV -o scan.json  # save normalized scan JSON
 hexpath lab.example -sV --plan        # resolve and preview, without scanning
 ```
@@ -37,6 +37,9 @@ Add `--scope scope.json` to constrain them to an existing engagement scope.
 terminal summary. `--cves` adds NVD lookups and returns status 2 if coverage is
 incomplete. CVE candidates are not confirmed vulnerabilities. The default
 scan timeout is five minutes; adjust it with `--timeout SECONDS`.
+Each host summary shows its information grade, the exact-CPE and completed-check
+counts behind it, and one next check. An OS fingerprint is labeled as a guess
+and does not change the grade.
 
 Run `hexpath` or `hexpath --help` for these options. The existing `scan`,
 `scope`, `cve`, `graph`, and `assess` commands remain available unchanged.

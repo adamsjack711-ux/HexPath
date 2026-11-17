@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from hexpath.cli import main
+from hexpath.direct_cli import render_result
 from hexpath.vulnerabilities import ScanVulnerabilityResult
 
 FIXTURE = (Path(__file__).parent / "fixtures/nmap_ipv6_sample.xml").read_text()
@@ -33,6 +34,8 @@ class DirectCliTests(unittest.TestCase):
         self.assertNotIn("-sV", command.arguments)
         self.assertIn("22/tcp", output)
         self.assertIn("OpenSSH 9.6", output)
+        self.assertIn("Information grade: C (50.0/100)", output)
+        self.assertIn("Next: Run --cves", output)
         self.assertIn("open|filtered", output)
         self.assertNotIn("80/tcp", output)
         cves.assert_not_called()
@@ -107,6 +110,7 @@ class DirectCliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("hosts", document)
         self.assertIn("services", document)
+        self.assertEqual(document["host_grades"]["2001:db8:1::10"]["grade"], "C")
         self.assertEqual(document["scope"]["targets"], ["2001:db8:1::10/128"])
         self.assertIn("Scanning", error)
 
@@ -117,3 +121,35 @@ class DirectCliTests(unittest.TestCase):
         self.assertIn("TARGET", output)
         self.assertIn("--cves", output)
         run.assert_not_called()
+
+    def test_direct_summary_labels_os_guess_and_sanitizes_terminal_controls(self):
+        document = {
+            "hosts": [{
+                "address": "2001:db8::10", "os_name": "Linux\x1b[2J",
+                "os_accuracy": 93, "cpes": ["cpe:/o:linux:linux_kernel:5"],
+            }],
+            "services": [],
+        }
+        rendered = render_result(document)
+        self.assertIn("OS fingerprint guess", rendered)
+        self.assertIn("OS CPEs (broad)", rendered)
+        self.assertIn("patch level unverified", rendered)
+        self.assertNotIn("\x1b", rendered)
+
+    def test_next_check_moves_beyond_generic_probe_when_version_stays_broad(self):
+        document = {
+            "hosts": [{"address": "2001:db8::10"}],
+            "services": [{
+                "host": "2001:db8::10", "port": 21, "protocol": "tcp",
+                "state": "open", "name": "ftp", "version": "2.0 or later",
+            }],
+            "command": ["nmap", "-6", "-sV", "2001:db8::10"],
+            "host_grades": {"2001:db8::10": {
+                "grade": "D", "score": 0.0, "open_services": 1,
+                "services_with_exact_cpe": 0,
+                "services_with_completed_cve_check": 0,
+            }},
+        }
+        rendered = render_result(document)
+        self.assertIn("protocol-specific query or trusted inventory", rendered)
+        self.assertNotIn("Next: Add -sV", rendered)

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import replace
 from ipaddress import ip_network
 import json
 import os
@@ -12,6 +11,7 @@ import shlex
 import socket
 import sys
 
+from hexpath.assessment import grade_host_information
 from hexpath.scanner import ScanProfile, ScannerError, build_nmap_command, parse_nmap_xml, run_nmap
 from hexpath.scope import Scope, ScopeError
 from hexpath.vulnerabilities import NvdClient, VulnerabilityError, check_scan_documents
@@ -65,11 +65,30 @@ def resolve_targets(targets: list[str], version: int | None) -> list[str]:
 
 def render_result(document: dict) -> str:
     lines = ["HexPath scan results", ""]
+    cves = document.get("cves")
     for host in document["hosts"]:
         address = host["address"]
         lines.append(f"Host: {address}")
+        information = document.get("host_grades", {}).get(address)
+        if information:
+            score = information["score"]
+            label = information["grade"] + (f" ({score:.1f}/100)" if score is not None else "")
+            lines.append(f"Information grade: {label} — evidence completeness, not a safety rating")
+            lines.append(
+                f"  Exact CPEs: {information['services_with_exact_cpe']}/"
+                f"{information['open_services']} open services; completed CVE checks: "
+                f"{information['services_with_completed_cve_check']}/"
+                f"{information['open_services']}"
+            )
         if host.get("os_name"):
-            lines.append(f"OS estimate: {host['os_name']} (accuracy {host.get('os_accuracy', 'unknown')}%)")
+            accuracy = host.get("os_accuracy")
+            lines.append(
+                f"OS fingerprint guess: {host['os_name']}"
+                + (f" ({accuracy}% Nmap accuracy)" if accuracy is not None else "")
+                + "; patch level unverified"
+            )
+        if host.get("cpes"):
+            lines.append("  OS CPEs (broad): " + ", ".join(host["cpes"]))
         services = [item for item in document["services"] if item["host"] == address]
         visible = [item for item in services if item["state"] != "closed"]
         if visible:
@@ -80,10 +99,30 @@ def render_result(document: dict) -> str:
                 lines.append(f"{port:<12} {service['state']:<15} {identity or 'unknown'}")
         else:
             lines.append("No open ports reported among the tested ports.")
+        if information:
+            open_count = information["open_services"]
+            exact_count = information["services_with_exact_cpe"]
+            checked_count = information["services_with_completed_cve_check"]
+            if not open_count:
+                next_check = "Confirm reachability and the selected port set from this vantage."
+            elif exact_count < open_count:
+                next_check = (
+                    "Use a protocol-specific query or trusted inventory to confirm exact versions; "
+                    "generic version probing was insufficient."
+                    if "-sV" in document.get("command", []) else
+                    "Add -sV to identify service versions; confirm unresolved versions with trusted evidence."
+                )
+            elif checked_count < open_count:
+                next_check = (
+                    "Run --cves for version-specific checks."
+                    if cves is None else "Retry incomplete version-specific CVE checks."
+                )
+            else:
+                next_check = "Review candidate applicability and service configuration."
+            lines.append(f"Next: {next_check}")
         lines.append("")
     if not document["hosts"]:
         lines.append("No hosts reported up. If the target is online, try -Pn.")
-    cves = document.get("cves")
     if cves is None:
         lines.append("CVE lookup not requested. Add --cves to check detected software.")
     else:
@@ -94,7 +133,10 @@ def render_result(document: dict) -> str:
         if not cves["completed"]:
             lines.append("Coverage incomplete; missing identities or failed lookups are not a clean result.")
         lines.append("CVE candidates require applicability checks; they do not prove exploitation.")
-    return "\n".join(lines)
+    return "\n".join(
+        "".join(character if character.isprintable() else "?" for character in line)
+        for line in lines
+    )
 
 
 def main(argv: list[str]) -> int:
@@ -114,9 +156,8 @@ def main(argv: list[str]) -> int:
         command = build_nmap_command(
             scope, targets, profile, skip_discovery=args.skip_discovery,
             ports="1-65535" if args.ports == "-" else args.ports, ip_version=args.ip_version,
+            os_detection=args.os_detection,
         )
-        if args.os_detection:
-            command = replace(command, arguments=(command.arguments[0], "-O", *command.arguments[1:]))
         if args.plan:
             print(shlex.join(command.arguments))
             if args.cves:
@@ -132,6 +173,14 @@ def main(argv: list[str]) -> int:
             document["cves"] = check_scan_documents(
                 [result.to_dict()], client=NvdClient(api_key=os.environ.get("NVD_API_KEY")),
             ).to_dict()
+        checks = document.get("cves", {}).get("checks", [])
+        document["host_grades"] = {
+            host["address"]: grade_host_information(
+                [document], document["services"], checks,
+                target_address=host["address"],
+            )
+            for host in document["hosts"]
+        }
         serialized = json.dumps(document, indent=2, sort_keys=True)
         if args.output:
             Path(args.output).write_text(serialized + "\n", encoding="utf-8")

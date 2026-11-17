@@ -170,6 +170,7 @@ def build_nmap_command(
     skip_discovery: bool = False,
     ports: str | None = None,
     ip_version: int | None = None,
+    os_detection: bool = False,
 ) -> NmapCommand:
     """Validate targets against scope and construct a conservative command."""
     if not targets:
@@ -218,12 +219,16 @@ def build_nmap_command(
 
     discovery_arguments = ("-Pn",) if skip_discovery else ()
     port_arguments = ("-p", _validate_ports(ports)) if ports is not None else ()
+    if os_detection and selected_profile is ScanProfile.DISCOVERY:
+        raise ScannerError("OS detection needs a port scan, not the discovery profile")
+    os_arguments = ("-O",) if os_detection else ()
 
     return NmapCommand(
         arguments=(
             common_arguments
             + discovery_arguments
             + port_arguments
+            + os_arguments
             + profile_arguments
             + authorized_targets
         ),
@@ -333,11 +338,28 @@ def parse_nmap_xml(
             for element in host_element.findall("./hostnames/hostname")
             if element.attrib.get("name")
         )
-        host = Host(
-            address=address,
-            hostnames=hostnames,
-            evidence=(host_evidence,),
-        )
+        os_name, os_accuracy, os_cpes = _parse_os_fingerprint(host_element)
+        host_evidence_records = [host_evidence]
+        if os_name or os_cpes:
+            host_evidence_records.append(Evidence(
+                source="nmap",
+                summary=(
+                    f"OS fingerprint guess {os_name or 'unknown'}"
+                    + (f" ({os_accuracy}% Nmap accuracy)" if os_accuracy is not None else "")
+                    + "; network fingerprinting does not establish patch level"
+                ),
+                level=EvidenceLevel.INFERRED,
+                collected_at=collected_at,
+                reference=f"{reference}#host-{address.compressed}-os",
+            ))
+        try:
+            host = Host(
+                address=address, hostnames=hostnames,
+                evidence=tuple(host_evidence_records), os_name=os_name,
+                os_accuracy=os_accuracy, cpes=os_cpes,
+            )
+        except ModelError as error:
+            raise NmapParseError(f"invalid host OS fingerprint: {error}") from error
         hosts.append(host)
         services.extend(
             _parse_services(
@@ -405,6 +427,39 @@ def _find_ip_address(host_element: ElementTree.Element) -> IPAddress | None:
             )
         return address
     return None
+
+
+def _parse_os_fingerprint(
+    host_element: ElementTree.Element,
+) -> tuple[str | None, int | None, tuple[str, ...]]:
+    """Use one best Nmap OS match, keeping its guess separate from services."""
+    os_element = host_element.find("os")
+    if os_element is None:
+        return None, None, ()
+    matches = os_element.findall("osmatch")
+
+    def accuracy(element: ElementTree.Element) -> int | None:
+        raw = element.attrib.get("accuracy")
+        try:
+            value = int(raw) if raw is not None else None
+        except ValueError:
+            return None
+        return value if value is not None and 0 <= value <= 100 else None
+
+    best = max(
+        matches,
+        key=lambda item: -1 if (value := accuracy(item)) is None else value,
+    ) if matches else None
+    source = best if best is not None else os_element
+    name = (best.attrib.get("name", "").strip() or None) if best is not None else None
+    cpes: list[str] = []
+    for element in source.findall(".//cpe"):
+        value = element.text.strip() if element.text else ""
+        if value and value not in cpes and (
+            value.startswith("cpe:/o:") or value.startswith("cpe:2.3:o:")
+        ):
+            cpes.append(value)
+    return name, accuracy(best) if best is not None else None, tuple(cpes)
 
 
 def _parse_services(

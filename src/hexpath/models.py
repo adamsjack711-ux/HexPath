@@ -158,24 +158,45 @@ class Host:
     address: IPAddress | str
     hostnames: tuple[str, ...] = ()
     evidence: tuple[Evidence, ...] = ()
+    os_name: str | None = None
+    os_accuracy: int | None = None
+    cpes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "address", _parse_ip(self.address, "host address"))
         hostnames = tuple(_require_text(name, "hostname") for name in self.hostnames)
         object.__setattr__(self, "hostnames", hostnames)
         object.__setattr__(self, "evidence", tuple(self.evidence))
+        if self.os_name is not None:
+            object.__setattr__(self, "os_name", _require_text(self.os_name, "os_name"))
+        if self.os_accuracy is not None and (
+            isinstance(self.os_accuracy, bool) or not isinstance(self.os_accuracy, int)
+            or not 0 <= self.os_accuracy <= 100
+        ):
+            raise ModelError("os_accuracy must be an integer from 0 to 100")
+        cpes = tuple(_normalize_cpe(cpe) for cpe in self.cpes)
+        if len(cpes) != len(set(cpes)):
+            raise ModelError("host contains duplicate CPE records")
+        object.__setattr__(self, "cpes", cpes)
 
     @property
     def record_id(self) -> str:
         return f"host:{self.address.compressed}"
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        document = {
             "id": self.record_id,
             "address": self.address.compressed,
             "hostnames": list(self.hostnames),
             "evidence": [item.to_dict() for item in self.evidence],
         }
+        if self.os_name is not None:
+            document["os_name"] = self.os_name
+        if self.os_accuracy is not None:
+            document["os_accuracy"] = self.os_accuracy
+        if self.cpes:
+            document["cpes"] = list(self.cpes)
+        return document
 
 
 @dataclass(frozen=True, slots=True)

@@ -29,6 +29,21 @@ def validate_scans(scope: Scope, documents: list[object]) -> list[dict[str, Any]
             address = scope.require_authorized(host.get("address"))
             if host.get("id") != f"host:{address}":
                 raise ValueError("host id must match its canonical IPv6 address")
+            if "os_name" in host and (
+                not isinstance(host["os_name"], str) or not host["os_name"].strip()
+            ):
+                raise ValueError("host os_name must be a non-empty string")
+            if "os_accuracy" in host and (
+                isinstance(host["os_accuracy"], bool)
+                or not isinstance(host["os_accuracy"], int)
+                or not 0 <= host["os_accuracy"] <= 100
+            ):
+                raise ValueError("host os_accuracy must be an integer from 0 to 100")
+            if "cpes" in host and (
+                not isinstance(host["cpes"], list)
+                or any(not isinstance(cpe, str) for cpe in host["cpes"])
+            ):
+                raise ValueError("host CPEs must be a list of strings")
         for service in scan["services"]:
             if not isinstance(service, dict):
                 raise ValueError("service must be an object")
@@ -113,6 +128,9 @@ def summarize_assessment(
         observations, modeled_matches, checks, target_address=target_address,
         source=source, target_observed=target in node_ids,
     )
+    host_information = _host_information_grade(
+        scans, observations, checks, target_address=target_address,
+    )
     return {
         "schema_version": "hexpath-ipv6-assessment-v2",
         "scope": {"name": scope.name, "targets": [str(n) for n in scope.networks]},
@@ -129,6 +147,7 @@ def summarize_assessment(
             "nodes": list(path.nodes), "total_cost": path.total_weight, "steps": steps,
         },
         "next_checks": next_checks,
+        "host_information": host_information,
         "limitations": [
             "CVE matches are investigation candidates, not confirmed compromise.",
             "CVE matches do not create access paths without observed access-effect evidence.",
@@ -199,6 +218,74 @@ def _modeled_matches(
     return modeled, excluded
 
 
+def _host_information_grade(
+    scans: list[dict[str, Any]], observations: list[dict[str, Any]],
+    checks: list[dict[str, Any]], *, target_address: str,
+) -> dict[str, Any]:
+    """Grade how complete the supplied service identity and lookup evidence is."""
+    services: dict[str, set[str]] = {}
+    for service in observations:
+        if service.get("host") != target_address or service.get("state") != "open":
+            continue
+        identities = services.setdefault(service["id"], set())
+        for raw_cpe in service.get("cpes", []):
+            try:
+                cpe = CpeIdentity(raw_cpe)
+            except VulnerabilityError:
+                continue
+            if cpe.precise_version:
+                identities.add(cpe.value)
+    completed = {
+        check.get("cpe") for check in checks
+        if check.get("completed") is True
+        and check.get("screening_complete") is not False
+        and check.get("status") != "unknown"
+    }
+    exact = sum(len(identities) == 1 for identities in services.values())
+    checked = sum(
+        len(identities) == 1 and identities <= completed
+        for identities in services.values()
+    )
+    if services:
+        score = round(50 * (exact + checked) / len(services), 1)
+        grade = "A" if score == 100 else "B" if score >= 75 else "C" if score >= 50 else "D"
+    else:
+        score, grade = None, "U"
+    os_guesses = []
+    seen_guesses: set[tuple[str | None, int | None, tuple[str, ...], str]] = set()
+    for scan in scans:
+        for host in scan["hosts"]:
+            if host.get("address") != target_address:
+                continue
+            name = host.get("os_name")
+            accuracy = host.get("os_accuracy")
+            cpes = tuple(host.get("cpes", []))
+            if not name and not cpes:
+                continue
+            key = (name, accuracy, cpes, scan["vantage"])
+            if key not in seen_guesses:
+                seen_guesses.add(key)
+                os_guesses.append({
+                    "name": name, "nmap_accuracy": accuracy,
+                    "cpes": list(cpes), "vantage": scan["vantage"],
+                    "evidence_level": "inferred",
+                })
+    os_guesses.sort(key=lambda item: (-(item["nmap_accuracy"] or 0), item["name"] or ""))
+    return {
+        "grade": grade, "score": score,
+        "open_services": len(services),
+        "services_with_exact_cpe": exact,
+        "services_with_completed_cve_check": checked,
+        "conflicting_service_ids": sorted(
+            service_id for service_id, identities in services.items() if len(identities) > 1
+        ),
+        "os_guesses": os_guesses,
+        "meaning": (
+            "Evidence completeness for observed open services; not a security or exploitability grade."
+        ),
+    }
+
+
 def _next_checks(
     observations: list[dict[str, Any]], matches: list[dict[str, Any]],
     checks: list[dict[str, Any]], *, target_address: str, source: str,
@@ -206,29 +293,41 @@ def _next_checks(
 ) -> list[dict[str, Any]]:
     """Turn target-specific evidence gaps into ordered, bounded follow-ups."""
     actions: list[dict[str, Any]] = []
-    services = {
-        item["id"]: item for item in observations
-        if item["host"] == target_address and item.get("state") == "open"
-    }
+    services: dict[str, list[dict[str, Any]]] = {}
+    for item in observations:
+        if item["host"] == target_address and item.get("state") == "open":
+            services.setdefault(item["id"], []).append(item)
     completed_cpes = {
         check.get("cpe") for check in checks
         if check.get("completed") is True
         and check.get("screening_complete") is not False
         and check.get("status") != "unknown"
     }
-    for service_id, service in sorted(services.items()):
+    for service_id, sightings in sorted(services.items()):
+        service = sightings[0]
         endpoint = (
             f"[{target_address}]:{service.get('port')}/{service.get('protocol')}"
         )
         precise_cpes: set[str] = set()
-        for raw_cpe in service.get("cpes", []):
-            try:
-                cpe = CpeIdentity(raw_cpe)
-            except VulnerabilityError:
-                continue
-            if cpe.precise_version:
-                precise_cpes.add(cpe.value)
-        if not precise_cpes:
+        for sighting in sightings:
+            for raw_cpe in sighting.get("cpes", []):
+                try:
+                    cpe = CpeIdentity(raw_cpe)
+                except VulnerabilityError:
+                    continue
+                if cpe.precise_version:
+                    precise_cpes.add(cpe.value)
+        if len(precise_cpes) > 1:
+            actions.append({
+                "kind": "reconcile_identity", "service_id": service_id,
+                "cpes": sorted(precise_cpes),
+                "action": (
+                    f"Reconcile conflicting exact CPEs recorded for {endpoint} "
+                    "before using version-specific CVE results."
+                ),
+            })
+            continue
+        elif not precise_cpes:
             actions.append({
                 "kind": "confirm_version", "service_id": service_id,
                 "action": (
@@ -311,12 +410,17 @@ def render_assessment(document: dict[str, Any]) -> str:
         and check.get("status") != "unknown"
         for check in checks
     )
+    host_information = document.get("host_information", {})
+    grade = host_information.get("grade", "U")
+    grade_score = host_information.get("score")
     lines = [
         "HexPath IPv6 Pentest Assessment", "===============================",
         f"Scope: {document['scope']['name']}",
         f"Starting point: {document['source']}", f"Objective: {document['target']}",
         "", "AT A GLANCE",
         f"  Target services observed: {len(target_ids)}",
+        f"  Host information grade: {grade}"
+        + (f" ({grade_score:.1f}/100)" if isinstance(grade_score, (int, float)) else ""),
         f"  Other hosts observed: {len(other_hosts)}",
         f"  Target CVE candidates: {len(target_candidates)} (not verified vulnerabilities)",
         f"  Target CVE links with observed access-effect evidence: "
@@ -348,6 +452,31 @@ def render_assessment(document: dict[str, Any]) -> str:
         lines.append("  An open target service was observed from the starting point.")
     elif not document["target_observed"]:
         lines.append("  The target was not observed in these scans.")
+    lines.extend(["", "HOST INFORMATION GRADE"])
+    lines.append(
+        f"  {grade}"
+        + (f" ({grade_score:.1f}/100)" if isinstance(grade_score, (int, float)) else "")
+        + ": completeness of supplied evidence, not a safety rating."
+    )
+    lines.append(
+        f"  Exact CPEs: {host_information.get('services_with_exact_cpe', 0)}/"
+        f"{host_information.get('open_services', 0)} open service(s); "
+        f"completed CVE checks: {host_information.get('services_with_completed_cve_check', 0)}/"
+        f"{host_information.get('open_services', 0)}."
+    )
+    for service_id in host_information.get("conflicting_service_ids", []):
+        lines.append(f"  Conflicting exact CPEs across scans: {service_id}.")
+    os_guesses = host_information.get("os_guesses", [])
+    if os_guesses:
+        for guess in os_guesses:
+            accuracy = guess.get("nmap_accuracy")
+            lines.append(
+                f"  OS fingerprint guess: {guess.get('name') or 'unnamed'}"
+                + (f" ({accuracy}% Nmap accuracy)" if accuracy is not None else "")
+                + f" from {guess.get('vantage')}; patch level unverified."
+            )
+    else:
+        lines.append("  OS fingerprint: not recorded for this target.")
     lines.extend(["", "OTHER OBSERVED HOSTS"])
     if other_hosts:
         for host, service_ids in sorted(other_hosts.items()):

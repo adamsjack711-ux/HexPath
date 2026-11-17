@@ -81,6 +81,8 @@ def build_parser() -> argparse.ArgumentParser:
     assess.add_argument("--cves", help="saved CVE results for offline assessment (no live targets)")
     assess.add_argument("--timeout", type=int, default=300, help="Nmap timeout in seconds")
     assess.add_argument("--cve-timeout", type=float, default=30)
+    assess.add_argument("-O", "--os-detection", action="store_true",
+                        help="include Nmap IPv6 OS fingerprinting in a live scan; needs privileges")
     assess.add_argument("--output", help="save full assessment evidence as JSON")
     assess.add_argument("--json", action="store_true", help="print JSON instead of terminal summary")
     assess.add_argument("targets", nargs="*", help="explicit IPv6 hosts to scan; omit for saved scans")
@@ -171,6 +173,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--ports",
         help="ports or ranges for the services profile, such as 22,80,443 or 1-1024",
     )
+    plan_parser.add_argument("-O", "--os-detection", action="store_true",
+                             help="add Nmap OS detection to this port scan")
     plan_family = plan_parser.add_mutually_exclusive_group()
     plan_family.add_argument(
         "-4",
@@ -228,6 +232,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--ports",
         help="ports or ranges for the services profile, such as 22,80,443 or 1-1024",
     )
+    run_parser.add_argument("-O", "--os-detection", action="store_true",
+                            help="add Nmap OS detection to this port scan")
     run_family = run_parser.add_mutually_exclusive_group()
     run_family.add_argument(
         "-4",
@@ -652,7 +658,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.targets:
                 # This workflow consumes explicit host seeds, never sweeps an IPv6 prefix.
                 targets = [str(scope.require_authorized(item)) for item in args.targets]
-                command = build_nmap_command(scope, targets, ScanProfile.SERVICES)
+                command = build_nmap_command(
+                    scope, targets, ScanProfile.SERVICES,
+                    os_detection=args.os_detection,
+                )
                 xml = run_nmap(command, timeout_seconds=args.timeout)
                 scans.append(parse_nmap_xml(xml, reference="live-nmap", vantage=source).to_dict())
                 scans = validate_scans(scope, scans)
@@ -689,6 +698,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 skip_discovery=args.skip_discovery,
                 ports=args.ports,
                 ip_version=args.ip_version,
+                os_detection=args.os_detection,
             )
             print(shlex.join(command.arguments))
             return 0
@@ -702,6 +712,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 skip_discovery=args.skip_discovery,
                 ports=args.ports,
                 ip_version=args.ip_version,
+                os_detection=args.os_detection,
             )
             xml_output = run_nmap(command, timeout_seconds=args.timeout)
             result = parse_nmap_xml(

@@ -105,6 +105,17 @@ class ScanCliTests(unittest.TestCase):
         self.assertIn("nmap -6", output.getvalue())
         self.assertIn("2001:db8:1::10/128", output.getvalue())
 
+    def test_plan_can_request_ipv6_os_fingerprint_explicitly(self) -> None:
+        output = StringIO()
+        with redirect_stdout(output):
+            exit_code = main([
+                "scan", "plan", "--scope", str(self.scope_path),
+                "--profile", "services", "-O", "2001:db8:1::10",
+            ])
+        self.assertEqual(exit_code, 0)
+        self.assertIn("nmap -6", output.getvalue())
+        self.assertIn(" -O ", output.getvalue())
+
     def test_levels_describe_information_and_relative_wait(self) -> None:
         output = StringIO()
 

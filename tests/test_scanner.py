@@ -76,6 +76,19 @@ class NmapCommandTests(unittest.TestCase):
         self.assertIn("-Pn", command.arguments)
         self.assertIn("-sV", command.arguments)
 
+    def test_ipv6_os_detection_is_explicit_and_requires_port_scan(self) -> None:
+        command = build_nmap_command(
+            self.scope, ["2001:db8:1::10"], ScanProfile.SERVICES,
+            os_detection=True,
+        )
+        self.assertIn("-6", command.arguments)
+        self.assertIn("-O", command.arguments)
+        with self.assertRaisesRegex(ScannerError, "needs a port scan"):
+            build_nmap_command(
+                self.scope, ["2001:db8:1::10"], ScanProfile.DISCOVERY,
+                os_detection=True,
+            )
+
     def test_accepts_numeric_service_port_selection(self) -> None:
         command = build_nmap_command(
             self.scope,
@@ -288,6 +301,27 @@ class NmapRunnerTests(unittest.TestCase):
 
 
 class NmapXmlParserTests(unittest.TestCase):
+    def test_ipv6_os_guess_uses_only_highest_accuracy_match(self) -> None:
+        xml = '''<nmaprun start="1794910000"><host>
+          <status state="up" reason="syn-ack"/>
+          <address addr="2001:db8:1::10" addrtype="ipv6"/>
+          <os>
+            <osmatch name="Linux 4.x" accuracy="80"><osclass>
+              <cpe>cpe:/o:linux:linux_kernel:4</cpe>
+            </osclass></osmatch>
+            <osmatch name="Linux 5.x" accuracy="96"><osclass>
+              <cpe>cpe:/o:linux:linux_kernel:5</cpe>
+              <cpe>cpe:/a:example:app:1.0</cpe>
+            </osclass></osmatch>
+          </os>
+        </host></nmaprun>'''
+        host = parse_nmap_xml(xml).hosts[0]
+        self.assertEqual(host.os_name, "Linux 5.x")
+        self.assertEqual(host.os_accuracy, 96)
+        self.assertEqual(host.cpes, ("cpe:/o:linux:linux_kernel:5",))
+        self.assertEqual(host.evidence[-1].level, EvidenceLevel.INFERRED)
+        self.assertIn("patch level", host.evidence[-1].summary)
+
     def test_parses_up_ipv6_hosts_and_relevant_services(self) -> None:
         result = parse_nmap_xml(
             FIXTURE_PATH.read_text(encoding="utf-8"),

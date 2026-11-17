@@ -61,6 +61,15 @@ unobserved target. It also asks the operator to record which IPv6 addresses,
 ports, protocols, and scan vantage were actually tested. Saved service
 observations alone do not establish full scan coverage.
 
+Each target summary also reports a **host information grade**. It measures the
+completeness of the supplied open-service identities and CVE checks, not host
+safety or exploitability. For each observed open service, an exact version CPE
+contributes half the possible points and a completed check for that CPE the
+other half. The score is the average across open services: `A=100`, `B=75–99`,
+`C=50–74`, `D=0–49`, and `U` when no open service was observed. Conflicting
+exact CPEs do not count as a confirmed identity. The grade does not establish
+whether a check is current or whether any CVE condition applies.
+
 The assessment command accepts explicit host seeds, not subnet sweeps. It does
 not enumerate an IPv6 prefix or claim complete host discovery. The existing
 scope rules exclude link-local, multicast, and IPv4-mapped ranges; these are
@@ -268,6 +277,18 @@ hexpath scan run \
 If an authorized host does not answer discovery probes, add `-Pn` to
 `scan plan` or `scan run` to tell Nmap to treat the target as online. Preview
 the resulting command with `scan plan` before running it.
+
+For an optional IPv6 OS fingerprint, add `-O` to `scan plan`, `scan run`, or a
+live `assess` command. This uses Nmap's IPv6 OS detection and requires the
+privileges needed for raw packets. HexPath displays the best reported OS match,
+its Nmap accuracy, and its OS CPEs as **inferred** host information. A kernel
+family guess does not identify the patch level and does not change the host
+information grade or create a vulnerability claim.
+
+```sh
+hexpath scan plan --scope scope.json --profile services -Pn -O \
+  --ports 21,80,139,445,65000 2001:db8:1::20
+```
 
 When a scan is actually run from an already reached host, record that host as
 the vantage point:

@@ -98,11 +98,52 @@ class AssessmentTests(unittest.TestCase):
 
     def test_next_checks_do_not_treat_unobserved_ipv6_host_as_clean(self):
         result = self.summarize(target="host:2001:db8::99")
+        self.assertEqual(result["host_information"]["grade"], "U")
+        self.assertIsNone(result["host_information"]["score"])
         self.assertEqual(
             [item["kind"] for item in result["next_checks"]],
             ["confirm_reachability", "record_probe_coverage"],
         )
         self.assertIn("target was not observed", result["next_checks"][0]["action"])
+
+    def test_host_information_grade_is_evidence_completeness_not_risk(self):
+        result = self.summarize()
+        self.assertEqual(result["host_information"]["grade"], "A")
+        self.assertEqual(result["host_information"]["score"], 100.0)
+        self.assertEqual(result["host_information"]["services_with_completed_cve_check"], 2)
+        self.assertIn("not a safety rating", render_assessment(result))
+
+        self.scan["services"][0]["cpes"] = ["cpe:/a:openbsd:openssh"]
+        self.cves["checks"][1]["completed"] = False
+        incomplete = self.summarize()
+        self.assertEqual(incomplete["host_information"]["grade"], "D")
+        self.assertEqual(incomplete["host_information"]["score"], 25.0)
+
+    def test_os_fingerprint_guess_is_displayed_without_becoming_a_patch_claim(self):
+        self.scan["hosts"][0].update({
+            "os_name": "Linux 5.x", "os_accuracy": 92,
+            "cpes": ["cpe:/o:linux:linux_kernel:5"],
+        })
+        result = self.summarize()
+        self.assertEqual(result["host_information"]["grade"], "A")
+        self.assertEqual(result["host_information"]["os_guesses"][0]["nmap_accuracy"], 92)
+        rendered = render_assessment(result)
+        self.assertIn("Linux 5.x (92% Nmap accuracy)", rendered)
+        self.assertIn("patch level unverified", rendered)
+
+    def test_import_rejects_invalid_os_accuracy(self):
+        self.scan["hosts"][0]["os_accuracy"] = 101
+        with self.assertRaisesRegex(ValueError, "os_accuracy"):
+            self.summarize()
+
+    def test_multiple_vantages_with_conflicting_cpes_need_reconciliation(self):
+        other = deepcopy(self.scan)
+        other["services"][0]["cpes"] = ["cpe:/a:openbsd:openssh:9.7"]
+        result = self.summarize([self.scan, other])
+        self.assertEqual(result["host_information"]["grade"], "C")
+        self.assertIn(self.scan["services"][0]["id"],
+                      result["host_information"]["conflicting_service_ids"])
+        self.assertIn("reconcile_identity", [item["kind"] for item in result["next_checks"]])
 
     def test_closed_or_uncertain_services_cannot_form_routes(self):
         for state in ("closed", "filtered", "open|filtered", "unknown"):

@@ -4,6 +4,43 @@ An IPv6-focused network penetration-testing tool for lab practice and authorized
 
 HexPath helps a network pentester answer: **from my current position, what is exposed over IPv6, and which potential path toward my target should I investigate?** It connects scoped service discovery, CVE candidates, and observations from multiple scan origins into an evidence-backed CLI assessment. This is our school group project; modeled paths guide investigation and do not establish successful exploitation.
 
+## Quick start
+
+Run HexPath directly against a target you are authorized to test:
+
+```sh
+hexpath 192.0.2.10
+```
+
+This checks Nmap's 1,000 most common TCP ports and prints a readable summary.
+Add only the information you need; flags can go before or after the target:
+
+```sh
+hexpath 192.0.2.10 -sV                 # service versions
+hexpath 192.0.2.10 -O                  # OS fingerprint (needs privileges)
+hexpath 192.0.2.10 --cves              # versions plus NVD CVE candidates
+hexpath 192.0.2.10 -p 22,80,443        # selected ports
+hexpath 192.0.2.10 -sV -p-             # versions on all TCP ports
+hexpath 192.0.2.10 -Pn                # target is online but discovery fails
+hexpath 2001:db8::10 -sV -o scan.json  # save normalized scan JSON
+hexpath lab.example -sV --plan        # resolve and preview, without scanning
+```
+
+IPv4 and IPv6 literals are detected automatically; use `-6` to select an IPv6
+address for a hostname. A hostname resolves to one address, which is fixed for
+validation and scanning. Multiple explicit targets of the same address family
+are accepted. Existing CIDR breadth and special-use restrictions still apply.
+
+No scope file is needed for this form: the supplied targets define the scope.
+Add `--scope scope.json` to constrain them to an existing engagement scope.
+`--json` prints machine-readable results; `-o` saves them while keeping the
+terminal summary. `--cves` adds NVD lookups and returns status 2 if coverage is
+incomplete. CVE candidates are not confirmed vulnerabilities. The default
+scan timeout is five minutes; adjust it with `--timeout SECONDS`.
+
+Run `hexpath` or `hexpath --help` for these options. The existing `scan`,
+`scope`, `cve`, `graph`, and `assess` commands remain available unchanged.
+
 ## Project status
 
 HexPath currently provides:

@@ -628,8 +628,13 @@ def _read_json_documents(paths: Sequence[str], document_name: str) -> list[objec
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run HexPath and return a process exit code."""
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    commands = {"scope", "sc", "scan", "s", "cve", "c", "graph", "g", "assess"}
+    if not arguments or arguments[0] not in commands | {"-V", "--version"}:
+        from hexpath.direct_cli import main as direct_main
+        return direct_main(arguments)
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(arguments)
 
     try:
         if args.command == "assess":

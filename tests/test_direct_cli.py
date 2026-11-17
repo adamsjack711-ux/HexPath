@@ -153,3 +153,48 @@ class DirectCliTests(unittest.TestCase):
         rendered = render_result(document)
         self.assertIn("protocol-specific query or trusted inventory", rendered)
         self.assertNotIn("Next: Add -sV", rendered)
+
+    def test_cve_summary_groups_candidates_by_host_and_bounds_readable_output(self):
+        document = {
+            "hosts": [{"address": "2001:db8::10"}, {"address": "2001:db8::20"}],
+            "services": [
+                {"id": "service:[2001:db8::10]:tcp:80", "host": "2001:db8::10",
+                 "port": 80, "protocol": "tcp", "state": "open", "name": "http"},
+                {"id": "service:[2001:db8::20]:tcp:22", "host": "2001:db8::20",
+                 "port": 22, "protocol": "tcp", "state": "open", "name": "ssh"},
+            ],
+            "cves": {
+                "matches": [
+                    {"service_id": "service:[2001:db8::10]:tcp:80", "cve_id": f"CVE-2026-{i}"}
+                    for i in range(1001, 1006)
+                ] + [{"service_id": "service:[2001:db8::20]:tcp:22", "cve_id": "CVE-2026-2001"}],
+                "vulnerabilities": [
+                    {"id": f"CVE-2026-{i}", "cvss_score": float(i - 1000),
+                     "description": "Long finding description that belongs in JSON"}
+                    for i in range(1001, 1006)
+                ],
+                "coverage": {"completed_cpe_checks": 1, "cpe_checks": 2, "invalid_cpes": 1},
+                "completed": False,
+            },
+        }
+        rendered = render_result(document)
+        first, second = rendered.split("Host: 2001:db8::20", 1)
+        self.assertIn("CVE candidates: 5", first)
+        self.assertIn("2 more candidate(s); use --json or -o", first)
+        self.assertNotIn("CVE-2026-2001", first)
+        self.assertIn("CVE candidates: 1", second)
+        self.assertIn("CVE-2026-2001", second)
+        self.assertNotIn("Long finding description", rendered)
+        self.assertIn("Coverage incomplete", rendered)
+
+    def test_host_with_no_open_selected_port_is_not_called_unreachable(self):
+        document = {
+            "hosts": [{"address": "2001:db8::30"}], "services": [],
+            "host_grades": {"2001:db8::30": {
+                "grade": "U", "score": None, "open_services": 0,
+                "services_with_exact_cpe": 0, "services_with_completed_cve_check": 0,
+            }},
+        }
+        rendered = render_result(document)
+        self.assertIn("Host responded; confirm the selected port set", rendered)
+        self.assertNotIn("Confirm reachability", rendered)

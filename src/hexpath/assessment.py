@@ -429,8 +429,9 @@ def render_assessment(document: dict[str, Any]) -> str:
         f"  CVE links excluded from routes: {document['excluded_match_count']}",
         "", "TARGET EXPOSURE",
     ]
+    displayed_exposures: set[tuple[str, str | None]] = set()
     for item in target_services:
-        lines.append(
+        exposure_line = (
             f"  {item['vantage']} -> [{item['host']}]:{item.get('port')}"
             f"/{item.get('protocol')}  {item.get('state')}  "
             f"{item.get('product') or item.get('name') or 'unknown service'} "
@@ -438,14 +439,22 @@ def render_assessment(document: dict[str, Any]) -> str:
         )
         confirmation = item.get("version_confirmation")
         original = item.get("original_identity")
+        confirmation_line = None
         if isinstance(confirmation, dict) and isinstance(original, dict):
             previous = original.get("version") or "unversioned"
-            lines.append(
+            confirmation_line = (
                 f"    Version confirmed by {confirmation.get('source', 'protocol probe')}: "
                 f"{confirmation.get('version', 'unknown')} "
                 f"(original scan: {previous}; "
                 f"{confirmation.get('reference', 'reference unavailable')})"
             )
+        display_key = (exposure_line, confirmation_line)
+        if display_key in displayed_exposures:
+            continue
+        displayed_exposures.add(display_key)
+        lines.append(exposure_line)
+        if confirmation_line:
+            lines.append(confirmation_line)
     if not target_services:
         lines.append("  No target services recorded; exposure is unknown.")
     if document["target_service_reachable_from_source"]:

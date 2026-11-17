@@ -66,6 +66,10 @@ def resolve_targets(targets: list[str], version: int | None) -> list[str]:
 def render_result(document: dict) -> str:
     lines = ["HexPath scan results", ""]
     cves = document.get("cves")
+    vulnerability_by_id = {
+        item["id"]: item for item in cves.get("vulnerabilities", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    } if isinstance(cves, dict) else {}
     for host in document["hosts"]:
         address = host["address"]
         lines.append(f"Host: {address}")
@@ -99,12 +103,43 @@ def render_result(document: dict) -> str:
                 lines.append(f"{port:<12} {service['state']:<15} {identity or 'unknown'}")
         else:
             lines.append("No open ports reported among the tested ports.")
+        if isinstance(cves, dict):
+            service_ports = {
+                item["id"]: f"{item['port']}/{item['protocol']}"
+                for item in services if item.get("state") == "open"
+            }
+            candidate_ports: dict[str, set[str]] = {}
+            for match in cves.get("matches", []):
+                if not isinstance(match, dict) or match.get("service_id") not in service_ports:
+                    continue
+                cve_id = match.get("cve_id")
+                if isinstance(cve_id, str):
+                    candidate_ports.setdefault(cve_id, set()).add(service_ports[match["service_id"]])
+            lines.append(f"CVE candidates: {len(candidate_ports)} NVD CPE matches; local applicability unverified")
+            ranked = sorted(
+                candidate_ports,
+                key=lambda cve_id: (
+                    -(vulnerability_by_id.get(cve_id, {}).get("cvss_score") or 0), cve_id,
+                ),
+            )
+            if ranked:
+                lines.append("  Highest CVSS catalog matches (not validated locally):")
+            for cve_id in ranked[:3]:
+                score = vulnerability_by_id.get(cve_id, {}).get("cvss_score")
+                severity = f" (CVSS {score:g})" if isinstance(score, (int, float)) else ""
+                lines.append(
+                    f"  {cve_id}{severity} on {', '.join(sorted(candidate_ports[cve_id]))}"
+                )
+            if len(ranked) > 3:
+                lines.append(f"  {len(ranked) - 3} more candidate(s); use --json or -o for the full list")
+            if not ranked and information and information["services_with_exact_cpe"] < information["open_services"]:
+                lines.append("  No candidates here does not mean clean; exact service versions are missing.")
         if information:
             open_count = information["open_services"]
             exact_count = information["services_with_exact_cpe"]
             checked_count = information["services_with_completed_cve_check"]
             if not open_count:
-                next_check = "Confirm reachability and the selected port set from this vantage."
+                next_check = "Host responded; confirm the selected port set and intended services from inventory."
             elif exact_count < open_count:
                 next_check = (
                     "Use a protocol-specific query or trusted inventory to confirm exact versions; "
@@ -127,12 +162,14 @@ def render_result(document: dict) -> str:
         lines.append("CVE lookup not requested. Add --cves to check detected software.")
     else:
         coverage = cves["coverage"]
-        lines.append(f"CVE lookup: {coverage['completed_cpe_checks']}/{coverage['cpe_checks']} software checks completed.")
-        for finding in cves["vulnerabilities"]:
-            lines.append(f"  {finding['id']}: {finding['description']}")
+        lines.append(
+            f"CVE lookup: {coverage['completed_cpe_checks']}/{coverage['cpe_checks']} "
+            f"precise CPE checks completed; {coverage.get('invalid_cpes', 0)} "
+            "broad or invalid CPE entries unresolved."
+        )
         if not cves["completed"]:
             lines.append("Coverage incomplete; missing identities or failed lookups are not a clean result.")
-        lines.append("CVE candidates require applicability checks; they do not prove exploitation.")
+        lines.append("Use --json or -o for full CVE records. Candidates require applicability checks; they do not prove exploitation.")
     return "\n".join(
         "".join(character if character.isprintable() else "?" for character in line)
         for line in lines

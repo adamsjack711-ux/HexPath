@@ -61,6 +61,17 @@ class AssessmentTests(unittest.TestCase):
         self.assertNotIn("2001:db8::20", target_section)
         self.assertIn("Lookup failed for " + self.cves["checks"][0]["cpe"], rendered)
 
+    def test_repeated_scan_observation_is_listed_once_in_exposure(self):
+        result = self.summarize()
+        target_observation = next(
+            item for item in result["observations"] if item["host"] == "2001:db8::10"
+        )
+        result["observations"].append(deepcopy(target_observation))
+        rendered = render_assessment(result)
+        exposure = rendered.split("TARGET EXPOSURE", 1)[1].split("HOST INFORMATION GRADE", 1)[0]
+        endpoint = f"[{target_observation['host']}]:{target_observation['port']}/{target_observation['protocol']}"
+        self.assertEqual(exposure.count(endpoint), 1)
+
     def test_open_target_without_cve_has_no_path_but_is_reachable(self):
         self.cves["matches"] = []
         result = self.summarize()

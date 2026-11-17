@@ -40,6 +40,10 @@ scan timeout is five minutes; adjust it with `--timeout SECONDS`.
 Each host summary shows its information grade, the exact-CPE and completed-check
 counts behind it, and one next check. An OS fingerprint is labeled as a guess
 and does not change the grade.
+With `--cves`, the readable view groups NVD candidates under each host and
+shows up to three catalog matches sorted by CVSS. Full matches and descriptions
+remain in JSON. A missing exact version or incomplete lookup is reported as a
+coverage gap; zero listed candidates does not establish that a host is clean.
 
 Run `hexpath` or `hexpath --help` for these options. The existing `scan`,
 `scope`, `cve`, `graph`, and `assess` commands remain available unchanged.

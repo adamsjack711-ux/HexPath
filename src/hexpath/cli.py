@@ -11,7 +11,13 @@ import shlex
 import sys
 
 from hexpath import __version__
-from hexpath.assessment import render_assessment, summarize_assessment, validate_scans
+from hexpath.assessment import (
+    build_host_information_report,
+    render_assessment,
+    render_host_information_report,
+    summarize_assessment,
+    validate_scans,
+)
 from hexpath.graph import (
     ENTRY_NODE_ID,
     AttackGraph,
@@ -83,8 +89,10 @@ def build_parser() -> argparse.ArgumentParser:
     assess.add_argument("--cve-timeout", type=float, default=30)
     assess.add_argument("-O", "--os-detection", action="store_true",
                         help="include Nmap IPv6 OS fingerprinting in a live scan; needs privileges")
-    assess.add_argument("--output", help="save full assessment evidence as JSON")
+    assess.add_argument("--output", help="save the selected assessment view as JSON")
     assess.add_argument("--json", action="store_true", help="print JSON instead of terminal summary")
+    assess.add_argument("--view", choices=("full", "host"), default="full",
+                        help="full assessment or selected-host information view")
     assess.add_argument("targets", nargs="*", help="explicit IPv6 hosts to scan; omit for saved scans")
 
     scope_parser = subcommands.add_parser(
@@ -264,6 +272,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument("targets", nargs="+", help="authorized IP addresses or CIDRs")
 
+    import_parser = scan_commands.add_parser(
+        "import-nmap", help="import saved Nmap XML, including NSE response evidence",
+    )
+    import_parser.set_defaults(scan_command="import-nmap")
+    import_parser.add_argument("--scope", required=True, help="authorized scope JSON")
+    import_parser.add_argument("--input", required=True, help="saved Nmap XML path")
+    import_parser.add_argument("--vantage", default=ENTRY_NODE_ID,
+                               help="entry:scanner or authorized host:<IP> scan origin")
+    import_parser.add_argument("--output", help="save normalized scan JSON")
+
     confirm_parser = scan_commands.add_parser(
         "confirm-mongodb", help="merge a scoped ZGrab2 MongoDB buildInfo result into saved scan JSON",
     )
@@ -350,6 +368,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=30,
         help="maximum time for each NVD request in seconds",
     )
+    scan_cve_parser.add_argument("--summary", action="store_true",
+                                 help="print coverage and per-host candidate counts instead of full JSON")
+    scan_cve_parser.add_argument("--output", help="save full CVE results as JSON")
 
     graph_parser = subcommands.add_parser(
         "graph",
@@ -632,6 +653,51 @@ def _read_json_documents(paths: Sequence[str], document_name: str) -> list[objec
     return [_read_json_document(path, document_name) for path in paths]
 
 
+def _render_cve_scan_summary(result: dict, scans: list[dict]) -> str:
+    """Summarize catalog matches and unresolved lookup coverage by host."""
+    coverage = result["coverage"]
+    service_hosts = {
+        service["id"]: service["host"]
+        for scan in scans for service in scan.get("services", [])
+        if isinstance(service, dict)
+        and isinstance(service.get("id"), str)
+        and isinstance(service.get("host"), str)
+    }
+    by_host: dict[str, set[str]] = {}
+    candidate_ids: set[str] = set()
+    for match in result.get("matches", []):
+        if not isinstance(match, dict):
+            continue
+        host = service_hosts.get(match.get("service_id"))
+        cve_id = match.get("cve_id")
+        if isinstance(cve_id, str):
+            candidate_ids.add(cve_id)
+        if host and isinstance(cve_id, str):
+            by_host.setdefault(host, set()).add(cve_id)
+    lines = [
+        "HexPath CVE Evidence Summary", "============================",
+        f"Observed services: {coverage['services']}",
+        f"Precise CPE checks: {coverage['completed_cpe_checks']}/{coverage['cpe_checks']} completed",
+        f"Coverage gaps: {coverage['invalid_cpes']} broad/invalid CPE entries; "
+        f"{coverage['services_without_cpe']} services without CPE",
+        f"Catalog candidates: {len(candidate_ids)} distinct CVE(s); "
+        "local applicability unverified",
+    ]
+    if by_host:
+        lines.extend(["", "CANDIDATES BY HOST"])
+        for host, cve_ids in sorted(by_host.items()):
+            lines.append(f"  [{host}]: {len(cve_ids)} candidate(s)")
+    lines.extend(["", "COVERAGE CONCLUSION"])
+    lines.append("  " + (
+        "All supplied service identities were checked."
+        if result["completed"] else
+        "Incomplete: unchecked services remain; zero candidates does not mean clean."
+    ))
+    lines.append("  Candidate CVEs are CPE catalog matches, not verified host vulnerabilities.")
+    lines.append("  Use --output to save full CVE records and service links as JSON.")
+    return "\n".join(lines)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run HexPath and return a process exit code."""
     arguments = list(sys.argv[1:] if argv is None else argv)
@@ -678,11 +744,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )).to_dict()
             )
             document = summarize_assessment(scope, scans, cves, source=source, target=target)
-            serialized = json.dumps(document, indent=2, sort_keys=True)
+            selected = build_host_information_report(document) if args.view == "host" else document
+            serialized = json.dumps(selected, indent=2, sort_keys=True)
             if args.output:
                 Path(args.output).write_text(serialized + "\n", encoding="utf-8")
-            print(serialized if args.json else render_assessment(document))
-            return 0 if document["coverage_complete"] else 2
+            print(serialized if args.json else (
+                render_host_information_report(selected) if args.view == "host" else
+                render_assessment(document)
+            ))
+            return 0 if (
+                selected["lookup_complete_for_observed_services"] if args.view == "host"
+                else document["coverage_complete"]
+            ) else 2
         if args.command == "scope" and args.scope_command == "check":
             scope = Scope.from_json_file(args.scope)
             address = scope.require_authorized(args.target)
@@ -725,7 +798,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                 reference="live-nmap",
                 vantage=vantage,
             )
-            print(result.to_json())
+            document = result.to_dict()
+            document["command"] = list(command.arguments)
+            document["scope"] = {
+                "name": scope.name, "targets": [str(network) for network in scope.networks],
+            }
+            print(json.dumps(document, indent=2, sort_keys=True))
+            return 0
+        if args.command == "scan" and args.scan_command == "import-nmap":
+            scope = Scope.from_json_file(args.scope)
+            vantage = require_authorized_vantage(scope, args.vantage)
+            xml = Path(args.input).read_text(encoding="utf-8")
+            document = validate_scans(scope, [parse_nmap_xml(
+                xml, reference=args.input, vantage=vantage,
+            ).to_dict()])[0]
+            serialized = json.dumps(document, indent=2, sort_keys=True) + "\n"
+            if args.output:
+                Path(args.output).write_text(serialized, encoding="utf-8")
+            else:
+                print(serialized, end="")
             return 0
         if args.command == "scan" and args.scan_command == "confirm-mongodb":
             scope = Scope.from_json_file(args.scope)
@@ -775,7 +866,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     api_key=os.environ.get("NVD_API_KEY"),
                 ),
             )
-            print(result.to_json())
+            document = result.to_dict()
+            if args.output:
+                Path(args.output).write_text(json.dumps(document, indent=2, sort_keys=True) + "\n",
+                                             encoding="utf-8")
+            print(_render_cve_scan_summary(document, documents) if args.summary else
+                  json.dumps(document, indent=2, sort_keys=True))
             return 0 if result.completed else 2
         if args.command == "graph" and args.graph_command == "build":
             scan_documents = _read_json_documents(args.scan, "scan")

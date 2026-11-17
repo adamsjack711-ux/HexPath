@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from hexpath.cli import build_parser, main
+from hexpath.cli import _render_cve_scan_summary, build_parser, main
 from hexpath.scanner import NmapScanResult
 from hexpath.vulnerabilities import (
     CpeIdentity,
@@ -104,6 +104,51 @@ class ScanCliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn("nmap -6", output.getvalue())
         self.assertIn("2001:db8:1::10/128", output.getvalue())
+
+    def test_import_nmap_preserves_script_evidence_and_enforces_scope(self) -> None:
+        xml_path = Path(self.temporary_directory.name) / "nmap.xml"
+        output_path = Path(self.temporary_directory.name) / "scan.json"
+        xml_path.write_text('''<nmaprun start="1794910000"><host>
+          <status state="up" reason="syn-ack"/>
+          <address addr="2001:db8:1::10" addrtype="ipv6"/>
+          <ports><port protocol="tcp" portid="21">
+            <state state="open" reason="syn-ack"/>
+            <service name="ftp" product="vsftpd" version="2.3.4"/>
+            <script id="ftp-syst" output="STAT says vsFTPd 3.0.3"/>
+          </port></ports>
+        </host></nmaprun>''', encoding="utf-8")
+        with patch("hexpath.cli.run_nmap") as run:
+            code = main(["scan", "import-nmap", "--scope", str(self.scope_path),
+                         "--input", str(xml_path), "--output", str(output_path)])
+        self.assertEqual(code, 0)
+        run.assert_not_called()
+        document = json.loads(output_path.read_text())
+        self.assertIn("vsFTPd 3.0.3", document["services"][0]["evidence"][1]["summary"])
+
+        xml_path.write_text(xml_path.read_text().replace("2001:db8:1::10", "2001:db8:2::10"))
+        error = StringIO()
+        with redirect_stderr(error):
+            code = main(["scan", "import-nmap", "--scope", str(self.scope_path),
+                         "--input", str(xml_path)])
+        self.assertEqual(code, 2)
+        self.assertIn("outside authorized scope", error.getvalue())
+
+    @patch("hexpath.cli.run_nmap")
+    def test_scan_run_records_the_exact_command_and_scope(self, run) -> None:
+        run.return_value = '''<nmaprun start="1794910000"><host>
+          <status state="up" reason="syn-ack"/>
+          <address addr="2001:db8:1::10" addrtype="ipv6"/>
+        </host></nmaprun>'''
+        output = StringIO()
+        with redirect_stdout(output):
+            code = main(["scan", "run", "--scope", str(self.scope_path),
+                         "--profile", "services", "--ports", "21,25", "2001:db8:1::10"])
+        self.assertEqual(code, 0)
+        document = json.loads(output.getvalue())
+        self.assertEqual(document["scope"]["name"], "test lab")
+        self.assertIn("-p", document["command"])
+        self.assertIn("21,25", document["command"])
+        self.assertIn("2001:db8:1::10/128", document["command"])
 
     def test_plan_can_request_ipv6_os_fingerprint_explicitly(self) -> None:
         output = StringIO()
@@ -259,10 +304,12 @@ class ScanCliTests(unittest.TestCase):
             )
 
         self.assertEqual(exit_code, 0)
-        self.assertEqual(
-            json.loads(output.getvalue()),
-            {"vantage": "entry:scanner", "hosts": [], "services": []},
-        )
+        document = json.loads(output.getvalue())
+        self.assertEqual(document["vantage"], "entry:scanner")
+        self.assertEqual(document["hosts"], [])
+        self.assertEqual(document["services"], [])
+        self.assertEqual(document["scope"]["name"], "test lab")
+        self.assertIn("2001:db8:1::10/128", document["command"])
 
     def test_plan_reports_out_of_scope_target(self) -> None:
         errors = StringIO()
@@ -283,6 +330,25 @@ class ScanCliTests(unittest.TestCase):
 
 
 class CveCliTests(unittest.TestCase):
+    def test_summary_separates_candidate_counts_from_incomplete_coverage(self) -> None:
+        result = {
+            "coverage": {"services": 2, "completed_cpe_checks": 1, "cpe_checks": 1,
+                         "invalid_cpes": 1, "services_without_cpe": 0},
+            "matches": [
+                {"service_id": "s1", "cve_id": "CVE-2026-1001"},
+                {"service_id": "s1", "cve_id": "CVE-2026-1002"},
+            ],
+            "vulnerabilities": [{"id": "CVE-2026-1001"}, {"id": "CVE-2026-1002"}],
+            "completed": False,
+        }
+        summary = _render_cve_scan_summary(result, [{"services": [
+            {"id": "s1", "host": "2001:db8::10"},
+            {"id": "s2", "host": "2001:db8::10"},
+        ]}])
+        self.assertIn("[2001:db8::10]: 2 candidate(s)", summary)
+        self.assertIn("Incomplete: unchecked services remain", summary)
+        self.assertIn("not verified host vulnerabilities", summary)
+
     @patch("hexpath.cli.check_package")
     def test_package_check_prints_provider_result(self, check_mock) -> None:
         package = PackageIdentity(ecosystem="PyPI", name="jinja2", version="2.4.1")
@@ -394,6 +460,24 @@ class CveCliTests(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue())["status"], "clean")
         check_mock.assert_called_once()
         self.assertEqual(len(check_mock.call_args.args[0]), 1)
+
+    @patch("hexpath.cli.check_scan_documents")
+    def test_scan_summary_saves_full_json_while_printing_short_view(self, check_mock) -> None:
+        check_mock.return_value = ScanVulnerabilityResult(
+            checks=(CpeVulnerabilityResult(cpe=CpeIdentity("cpe:/a:x:y:1"), completed=True),),
+            vulnerabilities=(), matches=(), service_count=1,
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            input_path = Path(folder) / "scan.json"
+            output_path = Path(folder) / "cves.json"
+            input_path.write_text('{"hosts": [], "services": [{"id": "s1", "host": "2001:db8::10", "cpes": ["cpe:/a:x:y:1"]}]}')
+            output = StringIO()
+            with redirect_stdout(output):
+                code = main(["cve", "scan", "--input", str(input_path),
+                             "--summary", "--output", str(output_path)])
+            self.assertEqual(code, 0)
+            self.assertIn("HexPath CVE Evidence Summary", output.getvalue())
+            self.assertEqual(json.loads(output_path.read_text())["completed"], True)
 
     @patch("hexpath.cli.check_scan_documents")
     def test_scan_check_accepts_multiple_vantage_files(self, check_mock) -> None:

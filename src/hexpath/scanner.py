@@ -354,6 +354,11 @@ def parse_nmap_xml(
                 collected_at=collected_at,
                 reference=f"{reference}#host-{address.compressed}-os",
             ))
+        host_evidence_records.extend(_script_evidence(
+            host_element.find("hostscript"),
+            collected_at=collected_at,
+            reference=f"{reference}#host-{address.compressed}",
+        ))
         try:
             host = Host(
                 address=address, hostnames=hostnames,
@@ -515,6 +520,11 @@ def _parse_services(
                 f"{protocol.value}-{port}"
             ),
         )
+        script_evidence = _script_evidence(
+            port_element,
+            collected_at=collected_at,
+            reference=f"{reference}#host-{address.compressed}-{protocol.value}-{port}",
+        )
         services.append(
             Service(
                 host=address,
@@ -525,8 +535,32 @@ def _parse_services(
                 product=service_attributes.get("product"),
                 version=service_attributes.get("version"),
                 cpes=cpes,
-                evidence=(service_evidence,),
+                evidence=(service_evidence, *script_evidence),
             )
         )
 
     return services
+
+
+def _script_evidence(
+    parent: ElementTree.Element | None, *, collected_at: datetime, reference: str,
+) -> tuple[Evidence, ...]:
+    """Keep NSE responses as reported observations without validating their claims."""
+    if parent is None:
+        return ()
+    records = []
+    for script in parent.findall("script"):
+        name = script.attrib.get("id", "").strip()
+        output = " ".join(script.attrib.get("output", "").split())
+        if not name or not output:
+            continue
+        if len(output) > 2000:
+            output = output[:2000] + " [truncated; see source XML]"
+        records.append(Evidence(
+            source="nmap-nse",
+            summary=f"Nmap script {name} reported: {output}",
+            level=EvidenceLevel.OBSERVED,
+            collected_at=collected_at,
+            reference=f"{reference}-script-{name}",
+        ))
+    return tuple(records)

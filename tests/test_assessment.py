@@ -9,7 +9,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from hexpath.assessment import render_assessment, summarize_assessment, validate_scans
+from hexpath.assessment import (
+    build_host_information_report, render_assessment, render_host_information_report,
+    summarize_assessment, validate_scans,
+)
 from hexpath.cli import main
 from hexpath.graph import ENTRY_NODE_ID
 from hexpath.scope import Scope
@@ -71,6 +74,21 @@ class AssessmentTests(unittest.TestCase):
         exposure = rendered.split("TARGET EXPOSURE", 1)[1].split("HOST INFORMATION GRADE", 1)[0]
         endpoint = f"[{target_observation['host']}]:{target_observation['port']}/{target_observation['protocol']}"
         self.assertEqual(exposure.count(endpoint), 1)
+
+    def test_host_view_prioritizes_version_discrepancy_without_graph_sections(self):
+        result = self.summarize()
+        target = next(item for item in result["observations"] if item["host"] == "2001:db8::10")
+        target["evidence"].append({
+            "source": "nmap-nse", "summary": "Nmap script banner reported: OpenSSH 9.7",
+        })
+        report = build_host_information_report(result)
+        rendered = render_host_information_report(report)
+        self.assertEqual(report["target"], "2001:db8::10")
+        self.assertIn("VERSION CLAIMS TO RECONCILE", rendered)
+        self.assertIn("OpenSSH 9.7", rendered)
+        self.assertIn("Reconcile version claims", rendered)
+        self.assertNotIn("ACCESS PATH", rendered)
+        self.assertNotIn("OTHER OBSERVED HOSTS", rendered)
 
     def test_open_target_without_cve_has_no_path_but_is_reachable(self):
         self.cves["matches"] = []
@@ -273,6 +291,19 @@ class AssessmentCliTests(unittest.TestCase):
         self.assertEqual(json.loads(bundle.read_text())["target"], "host:2001:db8::10")
         scan.assert_not_called()
         enrich.assert_not_called()
+
+    def test_host_view_exports_only_selected_host_information(self):
+        output = StringIO()
+        target_path = self.directory / "host.json"
+        with redirect_stdout(output):
+            code = main([*self.offline_args(), "--view", "host", "--output", str(target_path)])
+        self.assertEqual(code, 0)
+        self.assertIn("HexPath IPv6 Host Information", output.getvalue())
+        self.assertNotIn("ACCESS PATH", output.getvalue())
+        report = json.loads(target_path.read_text())
+        self.assertEqual(report["target"], "2001:db8::10")
+        self.assertNotIn("graph", report)
+        self.assertTrue(report["lookup_complete_for_observed_services"])
 
     @patch("hexpath.cli.run_nmap")
     @patch("hexpath.cli.check_scan_documents")

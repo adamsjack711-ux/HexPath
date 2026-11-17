@@ -114,6 +114,19 @@ other half. The score is the average across open services: `A=100`, `B=75–99`,
 exact CPEs do not count as a confirmed identity. The grade does not establish
 whether a check is current or whether any CVE condition applies.
 
+For an information-only report on one selected IPv6 host, use `--view host`:
+
+```sh
+hexpath assess --view host --scope scope.json --target 2001:db8:1::20 \
+  --scan scan.json --cves cves.json --output host-information.json
+```
+
+The terminal view groups open services, exact-CPE and lookup status, candidate
+counts, Nmap NSE responses, version discrepancies, and the next evidence to
+collect. It omits path analysis and other hosts. `--json` and `--output` return
+the same host-focused data. Exit 0 means the observed open services have
+completed CPE checks; it does not establish full port coverage or safety.
+
 The assessment command accepts explicit host seeds, not subnet sweeps. It does
 not enumerate an IPv6 prefix or claim complete host discovery. The existing
 scope rules exclude link-local, multicast, and IPv4-mapped ranges; these are
@@ -306,6 +319,18 @@ hexpath scan run \
   2001:db8:1::10 > scan.json
 ```
 
+`scan run` saves the exact Nmap command and scope in its JSON. Existing Nmap XML
+can be brought into the same evidence flow without another scan:
+
+```sh
+hexpath scan import-nmap --scope scope.json --input nmap.xml \
+  --output imported-scan.json
+```
+
+The import checks observed host addresses against scope and preserves Nmap NSE
+responses as reported evidence. Script text is not treated as a verified
+software identity; the host view calls out differing version claims for review.
+
 For a focused service scan, select a validated numeric port list or range with
 `--ports`. Custom ports are available only with the `services` profile so they
 cannot silently change the fixed definitions of information levels 0–4:
@@ -375,6 +400,15 @@ hexpath cve scan \
 Repeated services and CPEs are deduplicated, so the same CPE is queried once.
 A CPE that cannot be converted for NVD is listed under `invalid_cpes` and the
 rest of the scan is still checked; the result is then marked incomplete.
+
+For a readable coverage summary while saving all records:
+
+```sh
+hexpath cve scan --input scan.json --summary --output cve-results.json
+```
+
+The summary groups candidate counts by host, names incomplete lookup
+coverage, and does not call CPE catalog matches verified vulnerabilities.
 
 Check one Nmap CPE directly:
 

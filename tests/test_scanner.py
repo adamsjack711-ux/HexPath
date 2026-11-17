@@ -301,6 +301,25 @@ class NmapRunnerTests(unittest.TestCase):
 
 
 class NmapXmlParserTests(unittest.TestCase):
+    def test_keeps_port_and_host_script_output_as_unverified_evidence(self) -> None:
+        xml = '''<nmaprun start="1794910000"><host>
+          <status state="up" reason="user-set"/>
+          <address addr="2001:db8:1::10" addrtype="ipv6"/>
+          <ports><port protocol="tcp" portid="21">
+            <state state="open" reason="syn-ack"/>
+            <service name="ftp" product="vsftpd" version="2.3.4"/>
+            <script id="ftp-syst" output="STAT reports vsFTPd 3.0.3"/>
+          </port></ports>
+          <hostscript><script id="smb-os-discovery" output="Samba 4.13.13"/></hostscript>
+        </host></nmaprun>'''
+        result = parse_nmap_xml(xml, reference="nmap-followup.xml")
+        service = result.services[0]
+        self.assertEqual(service.version, "2.3.4")
+        self.assertIn("vsFTPd 3.0.3", service.evidence[1].summary)
+        self.assertEqual(service.evidence[1].source, "nmap-nse")
+        self.assertIn("Samba 4.13.13", result.hosts[0].evidence[-1].summary)
+        self.assertEqual(result.hosts[0].evidence[-1].level, EvidenceLevel.OBSERVED)
+
     def test_ipv6_os_guess_uses_only_highest_accuracy_match(self) -> None:
         xml = '''<nmaprun start="1794910000"><host>
           <status state="up" reason="syn-ack"/>

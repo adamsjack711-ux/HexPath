@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import re
 from typing import Any
 
 from hexpath.graph import ENTRY_NODE_ID, build_attack_graph
@@ -558,3 +559,188 @@ def render_assessment(document: dict[str, Any]) -> str:
     return "\n".join(
         "".join(c if c.isprintable() else "?" for c in line) for line in lines
     )
+
+
+def build_host_information_report(document: dict[str, Any]) -> dict[str, Any]:
+    """Project one selected host's scan and CVE evidence without path analysis."""
+    address = document["target"].removeprefix("host:")
+    information = document["host_information"]
+    observations: dict[str, dict[str, Any]] = {}
+    for item in document["observations"]:
+        if item.get("host") != address or item.get("state") != "open":
+            continue
+        record = observations.setdefault(item["id"], {
+            "id": item["id"], "port": item["port"], "protocol": item["protocol"],
+            "software": "unknown", "product": None, "version": None,
+            "cpes": set(), "nse_responses": set(),
+        })
+        record["product"] = item.get("product") or record["product"]
+        record["version"] = item.get("version") or record["version"]
+        record["software"] = " ".join(
+            str(record[key]) for key in ("product", "version") if record.get(key)
+        ) or item.get("name") or record["software"]
+        record["cpes"].update(item.get("cpes", []))
+        record["nse_responses"].update(
+            evidence["summary"] for evidence in item.get("evidence", [])
+            if isinstance(evidence, dict) and evidence.get("source") == "nmap-nse"
+            and isinstance(evidence.get("summary"), str)
+        )
+    completed_cpes = {
+        check.get("cpe") for check in document["cves"].get("checks", [])
+        if check.get("completed") is True
+        and check.get("screening_complete") is not False
+        and check.get("status") != "unknown"
+    }
+    candidates: dict[str, set[str]] = {}
+    for match in document.get("modeled_matches", []):
+        if not isinstance(match, dict) or match.get("service_id") not in observations:
+            continue
+        if isinstance(match.get("cve_id"), str):
+            candidates.setdefault(match["service_id"], set()).add(match["cve_id"])
+    services = []
+    for item in sorted(observations.values(), key=lambda row: (row["protocol"], row["port"])):
+        precise = set()
+        for raw_cpe in item["cpes"]:
+            try:
+                identity = CpeIdentity(raw_cpe)
+            except VulnerabilityError:
+                continue
+            if identity.precise_version:
+                precise.add(identity.value)
+        identity_status = "exact" if len(precise) == 1 else (
+            "conflicting" if len(precise) > 1 else "unresolved"
+        )
+        lookup_status = (
+            "complete" if len(precise) == 1 and precise <= completed_cpes else
+            "pending" if len(precise) == 1 else "unavailable"
+        )
+        version_discrepancies = []
+        product_token = (item["product"] or "").split(" ", 1)[0]
+        probed_version = re.search(r"\d+(?:\.\d+)+", item["version"] or "")
+        if product_token and probed_version:
+            pattern = re.compile(rf"\b{re.escape(product_token)}\s+(\d+(?:\.\d+)+)", re.I)
+            for response in item["nse_responses"]:
+                for reported_version in pattern.findall(response):
+                    if reported_version != probed_version.group(0):
+                        version_discrepancies.append(reported_version)
+        services.append({
+            "id": item["id"], "port": item["port"], "protocol": item["protocol"],
+            "software": item["software"], "identity_status": identity_status,
+            "exact_cpes": sorted(precise), "lookup_status": lookup_status,
+            "candidate_ids": sorted(candidates.get(item["id"], set())),
+            "nse_responses": sorted(item["nse_responses"]),
+            "nse_version_discrepancies": sorted(set(version_discrepancies)),
+        })
+    host_nse = set()
+    for scan in document["scans"]:
+        for host in scan.get("hosts", []):
+            if host.get("address") != address:
+                continue
+            host_nse.update(
+                evidence["summary"] for evidence in host.get("evidence", [])
+                if isinstance(evidence, dict) and evidence.get("source") == "nmap-nse"
+                and isinstance(evidence.get("summary"), str)
+            )
+    unresolved = [f"{s['port']}/{s['protocol']}" for s in services
+                  if s["identity_status"] == "unresolved"]
+    conflicting = [f"{s['port']}/{s['protocol']}" for s in services
+                   if s["identity_status"] == "conflicting"]
+    pending = [f"{s['port']}/{s['protocol']}" for s in services
+               if s["lookup_status"] == "pending"]
+    candidate_ids = sorted({cve for service in services for cve in service["candidate_ids"]})
+    candidate_ports = [f"{s['port']}/{s['protocol']}" for s in services if s["candidate_ids"]]
+    disputed = [s for s in services if s["nse_version_discrepancies"]]
+    steps = []
+    if not document["target_observed"]:
+        steps.append("Confirm the IPv6 address and scan vantage; the target was not observed.")
+    elif not services:
+        steps.append("Host responded, but no open service was recorded; check intended services and tested ports.")
+    for service in disputed:
+        endpoint = f"{service['port']}/{service['protocol']}"
+        steps.append(
+            f"Reconcile version claims on {endpoint}: service probe says "
+            f"{service['software']}; NSE response says "
+            f"{', '.join(service['nse_version_discrepancies'])}."
+        )
+    if unresolved:
+        steps.append("Confirm exact software versions on " + ", ".join(unresolved)
+                     + " with protocol-specific queries or trusted inventory.")
+    if conflicting:
+        steps.append("Reconcile conflicting exact identities on " + ", ".join(conflicting) + ".")
+    if pending:
+        steps.append("Complete version-specific CVE lookups for " + ", ".join(pending) + ".")
+    if candidate_ids:
+        steps.append(
+            f"Review local applicability, enabled features, and patch status for "
+            f"{len(candidate_ids)} candidate CVE(s) on {', '.join(candidate_ports)}."
+        )
+    steps.append("Record the IPv6 addresses, TCP/UDP ports, and vantage actually tested; "
+                 "service observations do not establish full coverage.")
+    return {
+        "target": address, "scope": document["scope"]["name"],
+        "vantage": document["source"], "target_observed": document["target_observed"],
+        "host_information": information, "services": services,
+        "candidate_cve_ids": candidate_ids, "host_nse_responses": sorted(host_nse),
+        "next_steps": steps,
+        "lookup_complete_for_observed_services": bool(services) and
+        information["services_with_completed_cve_check"] == len(services),
+        "meaning": "Information completeness for observed open services, not a safety or risk grade.",
+    }
+
+
+def render_host_information_report(report: dict[str, Any]) -> str:
+    """Present one IPv6 host's information gaps and follow-ups in the terminal."""
+    information = report["host_information"]
+    score = information["score"]
+    grade = information["grade"] + (f" ({score:.1f}/100)" if score is not None else "")
+    services = report["services"]
+    lines = [
+        "HexPath IPv6 Host Information", "=============================",
+        f"Target: [{report['target']}]", f"Scope: {report['scope']}",
+        f"Scan vantage: {report['vantage']}",
+        f"Host observed: {'yes' if report['target_observed'] else 'no'}",
+        f"Information grade: {grade} — evidence completeness, not a safety rating",
+        f"  Exact CPEs: {information['services_with_exact_cpe']}/{len(services)} open services; "
+        f"completed CVE checks: {information['services_with_completed_cve_check']}/{len(services)}",
+    ]
+    for guess in information.get("os_guesses", [])[:1]:
+        accuracy = guess.get("nmap_accuracy")
+        lines.append(f"OS fingerprint guess: {guess.get('name') or 'unknown'}"
+                     + (f" ({accuracy}% Nmap accuracy)" if accuracy is not None else "")
+                     + "; kernel and patch level unverified")
+    lines.extend(["", "OPEN SERVICE EVIDENCE"])
+    if services:
+        lines.append("PORT       SOFTWARE / VERSION                       CPE         CVE CHECK   CANDIDATES")
+        for item in services:
+            endpoint = f"{item['port']}/{item['protocol']}"
+            lines.append(
+                f"{endpoint:<10} {item['software'][:40]:<40} "
+                f"{item['identity_status']:<11} {item['lookup_status']:<11} "
+                f"{len(item['candidate_ids'])}"
+            )
+    else:
+        lines.append("No open service in the supplied observations; this is not a clean result.")
+    nse = [(f"{item['port']}/{item['protocol']}", summary)
+           for item in services for summary in item["nse_responses"]]
+    nse.extend(("host", summary) for summary in report["host_nse_responses"])
+    disputed = [item for item in services if item["nse_version_discrepancies"]]
+    if disputed:
+        lines.extend(["", "VERSION CLAIMS TO RECONCILE"])
+        for item in disputed:
+            lines.append(
+                f"  {item['port']}/{item['protocol']}: service probe {item['software']} "
+                f"vs NSE {', '.join(item['nse_version_discrepancies'])}; "
+                "the grade does not resolve this discrepancy."
+            )
+    if nse:
+        lines.extend(["", "NMAP SCRIPT RESPONSES (reported, not independently verified)"])
+        for endpoint, summary in nse:
+            lines.append(f"  {endpoint}: {summary[:350]}{'…' if len(summary) > 350 else ''}")
+    lines.extend(["", "CVE AND COVERAGE STATUS"])
+    lines.append(f"  {len(report['candidate_cve_ids'])} NVD CPE candidate(s); local applicability unverified.")
+    if len(services) != information["services_with_completed_cve_check"]:
+        lines.append("  Unchecked services remain; zero candidates on them does not mean clean.")
+    lines.extend(["", "NEXT INFORMATION TO COLLECT"])
+    for index, step in enumerate(report["next_steps"], 1):
+        lines.append(f"  {index}. {step}")
+    return "\n".join("".join(c if c.isprintable() else "?" for c in line) for line in lines)

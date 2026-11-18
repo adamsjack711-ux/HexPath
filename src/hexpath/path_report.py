@@ -4,21 +4,37 @@ from __future__ import annotations
 
 from typing import Any
 
-from hexpath.graph import GraphError, vulnerability_cost
+from hexpath.graph import GraphError, build_attack_graph, vulnerability_cost
 from hexpath.models import Confidence
 
 
 def compile_path_report(
-    scan: dict[str, Any],
+    scan: dict[str, Any] | list[dict[str, Any]],
     cves: dict[str, Any],
 ) -> dict[str, Any]:
-    """Rank observed target services and their CVE candidates."""
-    hosts = scan.get("hosts")
-    services = scan.get("services")
+    """Rank observed hosts and show only evidence-backed directed routes."""
+    scans = [scan] if isinstance(scan, dict) else scan
+    if not isinstance(scans, list) or not scans or any(not isinstance(item, dict) for item in scans):
+        raise ValueError("at least one scan document is required")
+    hosts_by_id: dict[str, dict[str, Any]] = {}
+    services_by_id: dict[str, dict[str, Any]] = {}
+    for document in scans:
+        raw_hosts = document.get("hosts")
+        raw_services = document.get("services")
+        if not isinstance(raw_hosts, list) or not isinstance(raw_services, list):
+            raise ValueError("each scan must contain host and service lists")
+        for item in raw_hosts:
+            if not isinstance(item, dict) or not isinstance(item.get("address"), str):
+                raise ValueError("scan hosts must have an address")
+            hosts_by_id.setdefault(item["address"], item)
+        for item in raw_services:
+            if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+                raise ValueError("scan services must have an id")
+            services_by_id.setdefault(item["id"], item)
+    hosts = list(hosts_by_id.values())
+    services = list(services_by_id.values())
     vulnerabilities = cves.get("vulnerabilities")
     matches = cves.get("matches")
-    if not isinstance(hosts, list) or not isinstance(services, list):
-        raise ValueError("latest scan must contain host and service lists")
     if not isinstance(vulnerabilities, list) or not isinstance(matches, list):
         raise ValueError("CVE results must contain vulnerability and match lists")
     if any(not isinstance(item, dict) for item in (*hosts, *services)):
@@ -46,6 +62,11 @@ def compile_path_report(
         for item in hosts
         if isinstance(item.get("address"), str)
     }
+    service_sources: dict[str, str] = {}
+    for document in scans:
+        for service in document["services"]:
+            if isinstance(service, dict) and isinstance(service.get("id"), str):
+                service_sources.setdefault(service["id"], document.get("vantage", "entry:scanner"))
     paths: list[dict[str, Any]] = []
     unmatched_services: list[dict[str, Any]] = []
     for service in services:
@@ -77,7 +98,7 @@ def compile_path_report(
                     "host": host,
                     "hostnames": host_names.get(host, []),
                 },
-                "source": scan.get("vantage", "entry:scanner"),
+                "source": service_sources.get(service_id, "entry:scanner"),
                 "endpoint": {
                     "host": host,
                     "port": service.get("port"),
@@ -125,13 +146,56 @@ def compile_path_report(
     paths.sort(key=_path_sort_key)
     for rank, path in enumerate(paths, 1):
         path["rank"] = rank
-    scope = scan.get("scope")
+    # A CVE match is a lead for investigation. Only observed access effects
+    # can create a directed route through the evidence-backed graph.
+    routes: dict[str, dict[str, Any]] = {}
+    if any(match.get("access_supported") is True for match in matches):
+        graph = build_attack_graph(scans, cves)
+        source = graph.default_source()
+        for host in hosts:
+            address = host.get("address")
+            if not isinstance(address, str):
+                continue
+            route = graph.shortest_path(source, graph.resolve_node(address))
+            if route is not None:
+                routes[address] = route.to_dict()
+
+    host_summaries = []
+    for host in hosts:
+        address = host.get("address")
+        if not isinstance(address, str):
+            continue
+        open_services = [
+            _service_summary(service) for service in services
+            if service.get("host") == address and service.get("state") == "open"
+        ]
+        candidates = [path for path in paths if path["target"]["host"] == address]
+        host_summaries.append({
+            "host": address,
+            "hostnames": host.get("hostnames", []),
+            "open_services": open_services,
+            "candidate_count": len(candidates),
+            "best_candidate": candidates[0] if candidates else None,
+            "priority_cost": candidates[0]["priority_cost"] if candidates else None,
+            "supported_route": routes.get(address),
+        })
+    host_summaries.sort(key=lambda item: (
+        item["priority_cost"] is None,
+        item["priority_cost"] if item["priority_cost"] is not None else float("inf"),
+        -item["candidate_count"],
+        item["host"],
+    ))
+    for rank, host in enumerate(host_summaries, 1):
+        host["rank"] = rank
+    scope = scans[0].get("scope")
     return {
         "schema_version": "hexpath-path-v1",
-        "source": scan.get("vantage", "entry:scanner"),
+        "source": "entry:scanner" if len(scans) > 1 else scans[0].get("vantage", "entry:scanner"),
         "scan_targets": scope.get("targets", []) if isinstance(scope, dict) else [],
         "candidate_paths": paths,
         "recommended_path": paths[0] if paths else None,
+        "ranked_hosts": host_summaries,
+        "recommended_host": host_summaries[0] if host_summaries and host_summaries[0]["candidate_count"] else None,
         "observed_services_without_cve_candidates": sorted(
             unmatched_services,
             key=lambda item: (
@@ -150,13 +214,36 @@ def render_path_report(document: dict[str, Any]) -> str:
     paths = document["candidate_paths"]
     coverage = "complete" if document["coverage_complete"] else "incomplete"
     lines = [
-        "HexPath Candidate Paths",
-        "=======================",
+        "HexPath Host Investigation Paths",
+        "================================",
         f"Starting point: {document['source']}",
         f"CVE lookup coverage: {coverage}",
     ]
+    hosts = document["ranked_hosts"]
+    lines.extend(["", f"Hosts observed: {len(hosts)}", "Host investigation priority (CVE candidates are unconfirmed)"])
+    for host in hosts:
+        best = host["best_candidate"]
+        lead = (
+            f"{best['finding']['cve_id']} on {best['endpoint']['port']}/{best['endpoint']['protocol']}"
+            if best else "no CVE candidate"
+        )
+        lines.append(
+            f"  {host['rank']}. {host['host']} | open services {len(host['open_services'])}"
+            f" | candidates {host['candidate_count']} | {lead}"
+        )
+        for service in host["open_services"][:5]:
+            lines.append(
+                f"     {service['port']}/{service['protocol']}: {_service_identity(service)}"
+            )
+        if len(host["open_services"]) > 5:
+            lines.append(f"     ... {len(host['open_services']) - 5} more open services in JSON")
+        route = host["supported_route"]
+        if route:
+            lines.append(f"     Evidence-backed route: {' -> '.join(route['nodes'])}")
+    if not any(host["supported_route"] for host in hosts):
+        lines.append("No evidence-backed host access route is recorded in these scans.")
     if not paths:
-        lines.append("No CVE-backed candidate path was found in the latest scan.")
+        lines.append("No CVE-backed investigation lead was found in the supplied scans.")
         unmatched = document["observed_services_without_cve_candidates"]
         if unmatched:
             lines.extend(["", "Observed open services without CVE candidates"])
@@ -171,7 +258,7 @@ def render_path_report(document: dict[str, Any]) -> str:
         ])
         return _render_lines(lines)
 
-    lines.append(f"Candidate paths: {len(paths)}")
+    lines.append(f"Investigation leads: {len(paths)}")
     for path in paths:
         endpoint = path["endpoint"]
         finding = path["finding"]
@@ -180,7 +267,7 @@ def render_path_report(document: dict[str, Any]) -> str:
         candidate_lines = [
             "",
             (
-                f"Path {path['rank']}: {path['source']} -> "
+                f"Lead {path['rank']}: {path['source']} -> "
                 f"{endpoint['host']}:{endpoint['port']}/{endpoint['protocol']}"
             ),
             f"  1. Port {endpoint['port']}/{endpoint['protocol']} is {endpoint['state']}",

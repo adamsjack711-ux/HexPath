@@ -119,6 +119,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="save the compiled path report as JSON",
     )
     path_parser.add_argument(
+        "--scan", action="append", default=[],
+        help="saved scan JSON; repeat to combine observations from multiple hosts",
+    )
+    path_parser.add_argument(
+        "--cves", help="saved CVE results for offline path analysis",
+    )
+    path_parser.add_argument(
         "--cve-timeout",
         type=float,
         default=30,
@@ -706,19 +713,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Nmap {action}: {result.version} ({result.path})")
             return 0
         if args.command == "path":
-            scan = load_latest_scan()
-            cves = scan.get("cves")
+            scans = _read_json_documents(args.scan, "scan") if args.scan else [load_latest_scan()]
+            if any(not isinstance(scan, dict) for scan in scans):
+                raise ValueError("each scan JSON must be an object")
+            cves = _read_json_document(args.cves, "CVE") if args.cves else (
+                scans[0].get("cves") if len(scans) == 1 else None
+            )
             if not isinstance(cves, dict):
                 cves = check_scan_documents(
-                    [scan],
+                    scans,
                     client=NvdClient(
                         timeout_seconds=args.cve_timeout,
                         api_key=os.environ.get("NVD_API_KEY"),
                     ),
                 ).to_dict()
-                scan["cves"] = cves
-                save_latest_scan(scan)
-            report = compile_path_report(scan, cves)
+                if not args.scan:
+                    scans[0]["cves"] = cves
+                    save_latest_scan(scans[0])
+            report = compile_path_report(scans, cves)
             serialized = json.dumps(report, indent=2, sort_keys=True)
             if args.output:
                 Path(args.output).write_text(serialized + "\n", encoding="utf-8")

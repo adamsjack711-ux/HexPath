@@ -12,6 +12,7 @@ import unittest
 from unittest.mock import patch
 
 from hexpath.cli import build_parser, main
+from hexpath.path_report import compile_path_report
 from hexpath.scanner import NmapScanResult
 from hexpath.setup import NmapSetupResult
 from hexpath.state import load_latest_scan, save_latest_scan
@@ -157,11 +158,65 @@ class PathCliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         rendered = output.getvalue()
-        self.assertIn("HexPath Candidate Paths", rendered)
+        self.assertIn("HexPath Host Investigation Paths", rendered)
         self.assertIn("192.0.2.10:22/tcp", rendered)
         self.assertIn("OpenSSH ssh 9.6", rendered)
         self.assertIn("CVE-2024-6387", rendered)
         self.assertIn("approved test", rendered)
+
+    def test_path_ranks_multiple_saved_hosts_without_inventing_access(self) -> None:
+        second = {
+            **self.scan,
+            "hosts": [{"id": "host:192.0.2.20", "address": "192.0.2.20", "hostnames": []}],
+            "services": [{**self.scan["services"][0], "id": "service:192.0.2.20:tcp:443", "host": "192.0.2.20", "port": 443}],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            first_file = Path(directory) / "first.json"
+            second_file = Path(directory) / "second.json"
+            cve_file = Path(directory) / "cves.json"
+            first_file.write_text(json.dumps(self.scan), encoding="utf-8")
+            second_file.write_text(json.dumps(second), encoding="utf-8")
+            cve_file.write_text(json.dumps(self.cves), encoding="utf-8")
+            output = StringIO()
+            with redirect_stdout(output):
+                exit_code = main(["path", "--scan", str(first_file), "--scan", str(second_file), "--cves", str(cve_file), "--json"])
+
+        report = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual([host["host"] for host in report["ranked_hosts"]], ["192.0.2.10", "192.0.2.20"])
+        self.assertEqual(report["ranked_hosts"][0]["candidate_count"], 1)
+        self.assertIsNone(report["ranked_hosts"][0]["supported_route"])
+        self.assertIsNone(report["ranked_hosts"][1]["priority_cost"])
+
+    def test_path_shows_route_only_with_observed_access_evidence(self) -> None:
+        observed = {"source": "school-lab", "summary": "Observed access effect in VM", "level": "observed", "collected_at": "2026-11-18T00:00:00+00:00", "reference": "fixture.json"}
+        cves = json.loads(json.dumps(self.cves))
+        cves["matches"][0].update({
+            "evidence": [observed], "access_supported": True,
+            "access_basis": "Observed in school VM", "access_evidence": [observed],
+        })
+        save_latest_scan({**self.scan, "cves": cves})
+        output = StringIO()
+        with redirect_stdout(output):
+            exit_code = main(["path", "--json"])
+        report = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(report["ranked_hosts"][0]["supported_route"]["nodes"][-1], "host:192.0.2.10")
+
+    def test_path_links_two_vantages_into_a_host_route(self) -> None:
+        observed = {"source": "school-lab", "summary": "Observed access effect in VM", "level": "observed", "collected_at": "2026-11-18T00:00:00+00:00", "reference": "fixture.json"}
+        first = json.loads(json.dumps(self.scan))
+        second = {
+            "vantage": "host:192.0.2.10",
+            "hosts": [{"id": "host:192.0.2.20", "address": "192.0.2.20", "hostnames": []}],
+            "services": [{**first["services"][0], "id": "service:192.0.2.20:tcp:443", "host": "192.0.2.20", "port": 443, "evidence": [observed]}],
+        }
+        cves = json.loads(json.dumps(self.cves))
+        cves["matches"][0].update({"evidence": [observed], "access_supported": True, "access_basis": "Observed in VM", "access_evidence": [observed]})
+        cves["matches"].append({**cves["matches"][0], "service_id": "service:192.0.2.20:tcp:443"})
+        report = compile_path_report([first, second], cves)
+        route = next(host["supported_route"] for host in report["ranked_hosts"] if host["host"] == "192.0.2.20")
+        self.assertEqual(route["nodes"], ["entry:scanner", "service:192.0.2.10:tcp:22", "host:192.0.2.10", "service:192.0.2.20:tcp:443", "host:192.0.2.20"])
 
     def test_path_json_preserves_ranked_endpoint_and_cve_details(self) -> None:
         save_latest_scan({**self.scan, "cves": self.cves})

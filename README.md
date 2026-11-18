@@ -1,8 +1,8 @@
 # HexPath
 
-An IPv6-focused network penetration-testing tool for lab practice and authorized engagements.
+An IPv6-focused network penetration-testing school project for controlled lab VMs.
 
-HexPath helps a network pentester answer: **from my current position, what is exposed over IPv6, and which potential path toward my target should I investigate?** It connects scoped service discovery, CVE candidates, and observations from multiple scan origins into an evidence-backed CLI assessment. This is our school group project; modeled paths guide investigation and do not establish successful exploitation.
+HexPath helps a network pentester answer: **from my current position, what is exposed over IPv6, which hosts merit investigation, and which modeled routes toward my target have supporting evidence?** It connects scoped service discovery, CVE candidates, and observations from multiple scan origins into an evidence-backed CLI assessment. This school group project is intended for safe, isolated VM labs. Modeled routes guide investigation and do not establish successful exploitation.
 
 ## Quick start
 
@@ -44,12 +44,24 @@ Run `hexpath` or `hexpath --help` for these options. The existing `scan`,
 
 Every completed target-first scan and `hexpath scan run` stores its normalized
 result as Hexpath's latest scan. Run `hexpath path` afterward with no additional
-arguments. Hexpath reuses embedded CVE results when the scan included `--cves`,
-or performs CVE enrichment from the saved service identities when needed. The
-report ranks candidate paths by the observed host and port, detected service and
-version, CVE severity and match confidence. Each path ends with the validation
-and authorized test that must be recorded before treating the candidate as an
-access result. `hexpath path --json` prints the same report as structured data.
+arguments. The command ranks all observed hosts for investigation using their
+open services and CVE candidates. It orders candidates by CVSS severity and
+match confidence, and keeps hosts with no CVE candidate visible. A candidate is
+an investigation lead, not a confirmed vulnerability or a route into a host.
+Only recorded, observed access effects create an evidence-backed host route.
+The JSON output includes the supporting route edges and evidence.
+
+To combine saved observations from different positions in a school lab VM,
+repeat `--scan`. Provide saved CVE results with `--cves` for an entirely offline
+report; otherwise Hexpath performs CVE lookups for the combined scans:
+
+```sh
+hexpath path --scan entry-scan.json --scan second-vantage-scan.json \
+  --cves lab-cves.json --json
+```
+
+`hexpath path --json` prints structured results, and `-o report.json` saves
+them. The default no-argument form reuses embedded CVE results when available.
 
 ## Project status
 

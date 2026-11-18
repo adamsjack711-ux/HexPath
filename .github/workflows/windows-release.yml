@@ -88,6 +88,7 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: >-
           gh release create $env:GITHUB_REF_NAME
           HexPath-Windows-x64.zip

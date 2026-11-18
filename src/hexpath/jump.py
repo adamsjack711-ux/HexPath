@@ -32,6 +32,7 @@ class JumpProfile:
     known_hosts_file: Path
     targets: tuple[str, ...]
     ports: str | None
+    scan_profile: ScanProfile
     timeout_seconds: int
 
 
@@ -93,6 +94,13 @@ def load_jump_profile(scan: dict[str, Any]) -> JumpProfile | None:
     ports = document.get("ports")
     if ports is not None:
         ports = _text(ports, "ports")
+    raw_profile = document.get("profile", ScanProfile.SERVICES.value)
+    try:
+        scan_profile = ScanProfile(raw_profile)
+    except (TypeError, ValueError) as error:
+        raise ValueError("jump profile profile must be 'basic' or 'services'") from error
+    if scan_profile not in {ScanProfile.BASIC, ScanProfile.SERVICES}:
+        raise ValueError("jump profile profile must be 'basic' or 'services'")
     timeout_seconds = document.get("timeout_seconds", 1200)
     if (
         isinstance(timeout_seconds, bool)
@@ -107,6 +115,7 @@ def load_jump_profile(scan: dict[str, Any]) -> JumpProfile | None:
         known_hosts_file=known_hosts_file,
         targets=tuple(targets),
         ports=ports,
+        scan_profile=scan_profile,
         timeout_seconds=timeout_seconds,
     )
 
@@ -135,7 +144,7 @@ def scan_through_jump(
         command = build_nmap_command(
             scope,
             [target],
-            ScanProfile.SERVICES,
+            profile.scan_profile,
             skip_discovery=True,
             ports=profile.ports,
             ip_version=ip_network(target).version,

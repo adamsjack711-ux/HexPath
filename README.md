@@ -67,6 +67,8 @@ For a pre-authorized network behind an SSH jump server, place
 `jump-profile.json` beside the saved state file (the directory selected by
 `HEXPATH_STATE_DIR`). The profile binds one scanned entry address to the exact
 internal targets, SSH identity, pinned known-hosts file, ports, and timeout.
+Profiles default to service/version detection; set `"profile": "basic"` for a
+large reachability and port-state exercise where version probes are too costly.
 After `hexpath ENTRY_IP`, the same zero-argument `hexpath path` command performs
 the configured internal scan through that server, caches it, enriches the
 separate vantage-aware evidence, and renders server-to-host paths. SSH is non-interactive and

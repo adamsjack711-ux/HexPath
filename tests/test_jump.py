@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from hexpath.jump import JumpProfile, load_jump_profile, scan_through_jump
+from hexpath.scanner import ScanProfile
 
 
 FIXTURE = (Path(__file__).parent / "fixtures/nmap_ipv6_sample.xml").read_text()
@@ -45,6 +46,7 @@ class JumpProfileTests(unittest.TestCase):
                 "known_hosts_file": str(self.known_hosts),
                 "targets": ["2001:db8:1::/120"],
                 "ports": "22,80",
+                "profile": "basic",
                 "timeout_seconds": 60,
             }),
             encoding="utf-8",
@@ -58,6 +60,7 @@ class JumpProfileTests(unittest.TestCase):
         self.assertIsNotNone(profile)
         self.assertEqual(profile.entry_host, "192.0.2.10")
         self.assertEqual(profile.targets, ("2001:db8:1::/120",))
+        self.assertEqual(profile.scan_profile, ScanProfile.BASIC)
         self.write_profile("192.0.2.11")
         self.assertIsNone(load_jump_profile(self.scan))
 
@@ -85,6 +88,7 @@ class JumpProfileTests(unittest.TestCase):
             known_hosts_file=self.known_hosts,
             targets=("2001:db8:1::/125",),
             ports="22,80",
+            scan_profile=ScanProfile.SERVICES,
             timeout_seconds=60,
         )
 

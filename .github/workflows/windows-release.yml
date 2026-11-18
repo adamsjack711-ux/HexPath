@@ -60,7 +60,12 @@ jobs:
           Copy-Item WINDOWS.md package\WINDOWS.md
           Compress-Archive -Path package\* -DestinationPath HexPath-Windows-x64.zip
           $hash = (Get-FileHash HexPath-Windows-x64.zip -Algorithm SHA256).Hash.ToLower()
-          "$hash  HexPath-Windows-x64.zip" | Set-Content -Encoding ascii HexPath-Windows-x64.zip.sha256
+          $checksum = "$hash  HexPath-Windows-x64.zip`n"
+          [IO.File]::WriteAllText(
+            (Join-Path $PWD "HexPath-Windows-x64.zip.sha256"),
+            $checksum,
+            [Text.Encoding]::ASCII
+          )
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

@@ -74,7 +74,7 @@ class CompactCliTests(unittest.TestCase):
             main(["-V"])
 
         self.assertEqual(raised.exception.code, 0)
-        self.assertEqual(output.getvalue(), "hexpath 0.1.0\n")
+        self.assertEqual(output.getvalue(), "hexpath 0.1.1\n")
 
 
 class ScanCliTests(unittest.TestCase):

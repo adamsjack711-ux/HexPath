@@ -386,7 +386,7 @@ class OsvClient:
             headers={
                 "Accept": "application/json",
                 "Content-Type": "application/json",
-                "User-Agent": "hexpath/0.1.0 pkgxray-osv-adapter",
+                "User-Agent": "hexpath/0.1.1 pkgxray-osv-adapter",
             },
         )
         try:
@@ -505,7 +505,7 @@ class NvdClient:
         )
         headers = {
             "Accept": "application/json",
-            "User-Agent": "hexpath/0.1.0",
+            "User-Agent": "hexpath/0.1.1",
         }
         if self.api_key is not None:
             headers["apiKey"] = self.api_key

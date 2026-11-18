@@ -73,7 +73,7 @@ class JumpProfileTests(unittest.TestCase):
             user="root",
             identity_file=self.identity,
             known_hosts_file=self.known_hosts,
-            targets=("2001:db8:1::/120",),
+            targets=("2001:db8:1::/125",),
             ports="22,80",
             timeout_seconds=60,
         )

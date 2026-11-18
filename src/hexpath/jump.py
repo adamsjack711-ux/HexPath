@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import time
 from typing import Any
 
 from hexpath.scanner import ScanProfile, build_nmap_command, parse_nmap_xml
@@ -110,16 +111,70 @@ def scan_through_jump(
         "name": "Configured jump targets",
         "targets": list(profile.targets),
     })
-    target_version = ip_network(profile.targets[0]).version
-    command = build_nmap_command(
-        scope,
-        profile.targets,
-        ScanProfile.SERVICES,
-        skip_discovery=True,
-        ports=profile.ports,
-        ip_version=target_version,
-    )
-    remote_command = shlex.join(command.arguments)
+    vantage = f"host:{profile.entry_host}"
+    internal: dict[str, Any] = {
+        "vantage": vantage,
+        "hosts": [],
+        "services": [],
+    }
+    deadline = time.monotonic() + profile.timeout_seconds
+    for target in _chunk_targets(profile.targets):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ValueError(
+                f"jump scan exceeded {profile.timeout_seconds} seconds"
+            )
+        command = build_nmap_command(
+            scope,
+            [target],
+            ScanProfile.SERVICES,
+            skip_discovery=True,
+            ports=profile.ports,
+            ip_version=ip_network(target).version,
+        )
+        completed = _run_ssh_command(
+            profile, shlex.join(command.arguments), remaining
+        )
+        result = parse_nmap_xml(
+            completed.stdout,
+            reference=f"ssh-jump:{profile.entry_host}",
+            vantage=vantage,
+        ).to_dict()
+        internal["hosts"].extend(result["hosts"])
+        internal["services"].extend(result["services"])
+    # Keep the remote result as its own scan document. Flattening it into the
+    # entry scan would discard the document-level vantage and could make the
+    # graph claim that internal services were reached directly by the scanner.
+    updated = deepcopy(scan)
+    updated["jump_scan"] = {
+        "completed": True,
+        "entry_host": profile.entry_host,
+        "targets": list(profile.targets),
+        "observed_hosts": len(internal["hosts"]),
+        "scan": internal,
+    }
+    updated.pop("cves", None)
+    return updated
+
+
+def _chunk_targets(
+    targets: tuple[str, ...], maximum_addresses: int = 8
+) -> tuple[str, ...]:
+    """Split authorized networks into bounded sequential Nmap host groups."""
+    chunks: list[str] = []
+    for target in targets:
+        network = ip_network(target)
+        if network.num_addresses <= maximum_addresses:
+            chunks.append(str(network))
+            continue
+        prefix = network.max_prefixlen - (maximum_addresses.bit_length() - 1)
+        chunks.extend(str(item) for item in network.subnets(new_prefix=prefix))
+    return tuple(chunks)
+
+
+def _run_ssh_command(
+    profile: JumpProfile, remote_command: str, timeout_seconds: float
+) -> subprocess.CompletedProcess[str]:
     ssh_command = [
         "ssh",
         "-o", "BatchMode=yes",
@@ -136,7 +191,7 @@ def scan_through_jump(
             check=False,
             capture_output=True,
             text=True,
-            timeout=profile.timeout_seconds,
+            timeout=timeout_seconds,
         )
     except FileNotFoundError as error:
         raise ValueError("ssh was not found; install an OpenSSH client") from error
@@ -147,26 +202,7 @@ def scan_through_jump(
     if completed.returncode != 0:
         detail = completed.stderr.strip() or f"ssh exited {completed.returncode}"
         raise ValueError(f"jump scan failed: {detail}")
-
-    vantage = f"host:{profile.entry_host}"
-    internal = parse_nmap_xml(
-        completed.stdout,
-        reference=f"ssh-jump:{profile.entry_host}",
-        vantage=vantage,
-    ).to_dict()
-    # Keep the remote result as its own scan document. Flattening it into the
-    # entry scan would discard the document-level vantage and could make the
-    # graph claim that internal services were reached directly by the scanner.
-    updated = deepcopy(scan)
-    updated["jump_scan"] = {
-        "completed": True,
-        "entry_host": profile.entry_host,
-        "targets": list(profile.targets),
-        "observed_hosts": len(internal["hosts"]),
-        "scan": internal,
-    }
-    updated.pop("cves", None)
-    return updated
+    return completed
 
 
 def _text(value: Any, name: str) -> str:

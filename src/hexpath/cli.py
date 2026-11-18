@@ -41,6 +41,7 @@ from hexpath.scanner import (
     scan_levels_document,
     scan_profile_for_level,
 )
+from hexpath.jump import load_jump_profile, scan_through_jump
 from hexpath.path_report import compile_path_report, render_path_report
 from hexpath.scope import Scope, ScopeError
 from hexpath.setup import SetupError, find_nmap, setup_nmap, verify_nmap
@@ -716,6 +717,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             scans = _read_json_documents(args.scan, "scan") if args.scan else [load_latest_scan()]
             if any(not isinstance(scan, dict) for scan in scans):
                 raise ValueError("each scan JSON must be an object")
+            if not args.scan:
+                jump_profile = load_jump_profile(scans[0])
+                jump_scan = scans[0].get("jump_scan")
+                if jump_profile is not None and not (
+                    isinstance(jump_scan, dict) and jump_scan.get("completed") is True
+                ):
+                    print(
+                        f"Scanning configured internal targets through {jump_profile.entry_host}…",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    scans[0] = scan_through_jump(scans[0], jump_profile)
+                    save_latest_scan(scans[0])
             cves = _read_json_document(args.cves, "CVE") if args.cves else (
                 scans[0].get("cves") if len(scans) == 1 else None
             )

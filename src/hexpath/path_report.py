@@ -98,7 +98,9 @@ def compile_path_report(
                     "host": host,
                     "hostnames": host_names.get(host, []),
                 },
-                "source": service_sources.get(service_id, "entry:scanner"),
+                "source": service.get("vantage") or service_sources.get(
+                    service_id, "entry:scanner"
+                ),
                 "endpoint": {
                     "host": host,
                     "port": service.get("port"),

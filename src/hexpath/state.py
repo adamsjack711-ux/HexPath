@@ -11,6 +11,7 @@ from typing import Any
 
 STATE_DIRECTORY_ENV = "HEXPATH_STATE_DIR"
 LATEST_SCAN_FILENAME = "latest-scan.json"
+JUMP_PROFILE_FILENAME = "jump-profile.json"
 
 
 def state_directory() -> Path:
@@ -29,6 +30,11 @@ def state_directory() -> Path:
 def latest_scan_path() -> Path:
     """Return the file used by ``hexpath path``."""
     return state_directory() / LATEST_SCAN_FILENAME
+
+
+def jump_profile_path() -> Path:
+    """Return the optional profile used to scan through a jump server."""
+    return state_directory() / JUMP_PROFILE_FILENAME
 
 
 def save_latest_scan(document: dict[str, Any]) -> Path:

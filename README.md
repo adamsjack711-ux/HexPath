@@ -63,6 +63,16 @@ hexpath path --scan entry-scan.json --scan second-vantage-scan.json \
 `hexpath path --json` prints structured results, and `-o report.json` saves
 them. The default no-argument form reuses embedded CVE results when available.
 
+For a pre-authorized network behind an SSH jump server, place
+`jump-profile.json` beside the saved state file (the directory selected by
+`HEXPATH_STATE_DIR`). The profile binds one scanned entry address to the exact
+internal targets, SSH identity, pinned known-hosts file, ports, and timeout.
+After `hexpath ENTRY_IP`, the same zero-argument `hexpath path` command performs
+the configured internal scan through that server, caches it, enriches the
+merged evidence, and renders server-to-host paths. SSH is non-interactive and
+requires strict host-key verification; arbitrary targets are never inferred.
+The local example server image is under `lab/jump/`.
+
 ## Project status
 
 HexPath currently provides:

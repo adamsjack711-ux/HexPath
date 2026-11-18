@@ -258,6 +258,45 @@ class PathCliTests(unittest.TestCase):
         check_mock.assert_called_once()
         self.assertEqual(load_latest_scan()["cves"], self.cves)
 
+    @patch("hexpath.cli.scan_through_jump")
+    @patch("hexpath.cli.load_jump_profile")
+    @patch("hexpath.cli.check_scan_documents")
+    def test_path_scans_configured_jump_once_before_compiling(
+        self, check_mock, profile_mock, jump_mock
+    ) -> None:
+        save_latest_scan(self.scan)
+        profile_mock.return_value.entry_host = "192.0.2.10"
+        internal_service = {
+            **self.scan["services"][0],
+            "id": "service:2001:db8:64::300:tcp:80",
+            "host": "2001:db8:64::300",
+            "port": 80,
+            "vantage": "host:192.0.2.10",
+        }
+        expanded = {
+            **self.scan,
+            "hosts": [
+                *self.scan["hosts"],
+                {
+                    "id": "host:2001:db8:64::300",
+                    "address": "2001:db8:64::300",
+                    "hostnames": [],
+                    "evidence": [],
+                },
+            ],
+            "services": [*self.scan["services"], internal_service],
+            "jump_scan": {"completed": True},
+        }
+        jump_mock.return_value = expanded
+        check_mock.return_value.to_dict.return_value = self.cves
+
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            main(["path"])
+            main(["path"])
+
+        jump_mock.assert_called_once_with(self.scan, profile_mock.return_value)
+        self.assertTrue(load_latest_scan()["jump_scan"]["completed"])
+
     def test_path_explains_when_no_scan_has_been_saved(self) -> None:
         errors = StringIO()
 

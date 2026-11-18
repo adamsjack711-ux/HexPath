@@ -19,6 +19,7 @@ from hexpath.state import jump_profile_path
 
 
 _SSH_USER = re.compile(r"[A-Za-z0-9_.-]+")
+MAX_JUMP_SCAN_ADDRESSES = 256
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +72,7 @@ def load_jump_profile(scan: dict[str, Any]) -> JumpProfile | None:
         raise ValueError("jump profile targets must be a non-empty list")
     targets: list[str] = []
     versions: set[int] = set()
+    address_count = 0
     for raw_target in raw_targets:
         target = _text(raw_target, "target")
         try:
@@ -79,8 +81,14 @@ def load_jump_profile(scan: dict[str, Any]) -> JumpProfile | None:
             raise ValueError(f"invalid jump profile target: {target}") from error
         targets.append(str(network))
         versions.add(network.version)
+        address_count += network.num_addresses
     if len(versions) != 1:
         raise ValueError("jump profile targets must use one IP family")
+    if address_count > MAX_JUMP_SCAN_ADDRESSES:
+        raise ValueError(
+            "jump profile targets may contain at most "
+            f"{MAX_JUMP_SCAN_ADDRESSES} total addresses"
+        )
 
     ports = document.get("ports")
     if ports is not None:

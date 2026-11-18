@@ -61,6 +61,16 @@ class JumpProfileTests(unittest.TestCase):
         self.write_profile("192.0.2.11")
         self.assertIsNone(load_jump_profile(self.scan))
 
+    def test_rejects_jump_targets_that_expand_beyond_the_scan_cap(self) -> None:
+        self.write_profile()
+        profile_path = self.root / "jump-profile.json"
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+        profile["targets"] = ["2001:db8:1::/119"]
+        profile_path.write_text(json.dumps(profile), encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "at most 256 total addresses"):
+            load_jump_profile(self.scan)
+
     @patch("hexpath.jump.subprocess.run")
     def test_internal_scan_is_strict_ssh_and_records_the_jump_vantage(
         self, run_mock

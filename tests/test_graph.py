@@ -1260,5 +1260,65 @@ class DeepGraphRenderingTests(unittest.TestCase):
             render_attack_graph_ascii(chain_graph(1), max_depth=0)
 
 
+class OsFindingGraphTests(unittest.TestCase):
+    def _os_scan_and_cves(self) -> tuple[dict, dict]:
+        observed = evidence().to_dict()
+        inferred = Evidence(
+            source="nvd",
+            summary="OS CPE applicability match",
+            level=EvidenceLevel.INFERRED,
+            collected_at=COLLECTED_AT,
+            reference="https://nvd.nist.gov/vuln/detail/CVE-2008-4250",
+        ).to_dict()
+        scan = {
+            "hosts": [
+                {
+                    "id": "host:192.168.56.101",
+                    "address": "192.168.56.101",
+                    "hostnames": [],
+                    "os_name": "Microsoft Windows XP SP3",
+                    "cpes": ["cpe:/o:microsoft:windows_xp"],
+                    "evidence": [observed],
+                }
+            ],
+            "services": [
+                {
+                    "id": "service:[192.168.56.101]:tcp:445",
+                    "host": "192.168.56.101",
+                    "port": 445,
+                    "protocol": "tcp",
+                    "state": "open",
+                    "name": "microsoft-ds",
+                    "cpes": [],
+                    "evidence": [observed],
+                }
+            ],
+        }
+        cves = {
+            "vulnerabilities": [
+                {"id": "CVE-2008-4250", "cvss_score": 10.0, "references": []}
+            ],
+            "matches": [
+                {
+                    "service_id": "os:[192.168.56.101]",
+                    "cve_id": "CVE-2008-4250",
+                    "confidence": "low",
+                    "reason": "OS CPE candidate; no patch level.",
+                    "evidence": [inferred],
+                }
+            ],
+        }
+        return scan, cves
+
+    def test_os_inventory_cannot_create_an_access_path(self) -> None:
+        scan, cves = self._os_scan_and_cves()
+
+        # A broad, versionless OS fingerprint is inventory evidence. It is not
+        # a listening service or observed access effect, so it must never be
+        # accepted as the source of an exploit edge.
+        with self.assertRaisesRegex(GraphError, "unknown service"):
+            build_attack_graph(scan, cves)
+
+
 if __name__ == "__main__":
     unittest.main()

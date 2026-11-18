@@ -173,6 +173,7 @@ def build_nmap_command(
     skip_discovery: bool = False,
     ports: str | None = None,
     ip_version: int | None = None,
+    os_detection: bool = False,
 ) -> NmapCommand:
     """Validate targets against scope and construct a conservative command."""
     if not targets:
@@ -222,12 +223,19 @@ def build_nmap_command(
 
     discovery_arguments = ("-Pn",) if skip_discovery else ()
     port_arguments = ("-p", _validate_ports(ports)) if ports is not None else ()
+    if os_detection and selected_profile is ScanProfile.DISCOVERY:
+        raise ScannerError(
+            "OS detection needs a port scan; use it with a scanning profile, "
+            "not discovery"
+        )
+    os_arguments = ("-O",) if os_detection else ()
 
     return NmapCommand(
         arguments=(
             common_arguments
             + discovery_arguments
             + port_arguments
+            + os_arguments
             + profile_arguments
             + authorized_targets
         ),
@@ -380,10 +388,28 @@ def parse_nmap_xml(
             for element in host_element.findall("./hostnames/hostname")
             if element.attrib.get("name")
         )
+        os_name, os_cpes = _parse_os_fingerprint(host_element)
+        host_evidence_records = [host_evidence]
+        if os_cpes:
+            host_evidence_records.append(
+                Evidence(
+                    source="nmap",
+                    summary=(
+                        "OS fingerprint "
+                        f"{os_name or 'match'} reported CPEs {', '.join(os_cpes)}; "
+                        "network OS detection cannot see patch level"
+                    ),
+                    level=EvidenceLevel.INFERRED,
+                    collected_at=collected_at,
+                    reference=f"{reference}#host-{address.compressed}-os",
+                )
+            )
         host = Host(
             address=address,
             hostnames=hostnames,
-            evidence=(host_evidence,),
+            os_name=os_name,
+            cpes=os_cpes,
+            evidence=tuple(host_evidence_records),
         )
         hosts.append(host)
         services.extend(
@@ -452,6 +478,55 @@ def _find_ip_address(host_element: ElementTree.Element) -> IPAddress | None:
             )
         return address
     return None
+
+
+def _parse_os_fingerprint(
+    host_element: ElementTree.Element,
+) -> tuple[str | None, tuple[str, ...]]:
+    """Extract the best OS match name and its CPEs from an Nmap <os> block.
+
+    Nmap only emits this when run with OS detection (``-O``), which needs
+    elevated privileges. The CPEs it reports describe the operating system
+    (for example ``cpe:/o:microsoft:windows_xp``) and carry no patch level,
+    so callers must treat any CVE derived from them as low-confidence.
+    """
+    os_element = host_element.find("os")
+    if os_element is None:
+        return None, ()
+
+    # osmatch elements are ordered by Nmap from highest to lowest accuracy. Use
+    # only the best match for both the name and the CPEs: taking CPEs from every
+    # candidate would attach several mutually exclusive operating systems (for
+    # example windows_xp and windows_7) to one host and inflate the candidate
+    # CVE set with OSes the host is not. Fall back to any CPEs directly under
+    # <os> if Nmap emitted no osmatch wrapper.
+    os_name: str | None = None
+    best_match = os_element.find("osmatch")
+    cpe_source = best_match if best_match is not None else os_element
+    if best_match is not None:
+        candidate = best_match.attrib.get("name")
+        if candidate and candidate.strip():
+            os_name = candidate.strip()
+
+    cpes: list[str] = []
+    for cpe_element in cpe_source.findall(".//cpe"):
+        if cpe_element.text is None:
+            continue
+        value = cpe_element.text.strip()
+        # Keep only operating-system CPEs; hardware or application CPEs that
+        # sometimes appear under osclass are not what host-level scoring means.
+        if value and value not in cpes and _is_os_cpe(value):
+            cpes.append(value)
+
+    return os_name, tuple(cpes)
+
+
+def _is_os_cpe(value: str) -> bool:
+    if value.startswith("cpe:2.3:o:"):
+        return True
+    if value.startswith("cpe:/o:"):
+        return True
+    return False
 
 
 def _parse_services(

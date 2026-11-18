@@ -646,6 +646,50 @@ class ScanVulnerabilityTests(unittest.TestCase):
                          CpeIdentity("cpe:/a:openbsd:openssh:9.6").value)
         self.assertIn("local patch status must be verified", result.matches[0].reason)
 
+    def test_host_os_cpes_remain_inventory_only(self) -> None:
+        def unexpected_transport(*_args):
+            raise AssertionError("inventory-only OS CPE must not be queried")
+
+        client = NvdClient(
+            transport=unexpected_transport
+        )
+        document = {
+            "hosts": [
+                {
+                    "id": "host:192.168.56.101",
+                    "address": "192.168.56.101",
+                    "os_name": "Microsoft Windows XP SP3",
+                    "cpes": ["cpe:/o:microsoft:windows_xp"],
+                }
+            ],
+            "services": [
+                {"id": "service:[192.168.56.101]:tcp:445", "cpes": []},
+            ],
+        }
+
+        result = check_scan_document(document, client=client)
+
+        self.assertEqual(result.status, VulnerabilityStatus.UNKNOWN)
+        self.assertEqual(result.vulnerabilities, ())
+        self.assertEqual(result.matches, ())
+        self.assertEqual(
+            result.unmatched_services,
+            ("service:[192.168.56.101]:tcp:445",),
+        )
+
+    def test_host_without_os_cpes_adds_no_os_finding(self) -> None:
+        client = NvdClient(
+            transport=lambda _request, _timeout, _limit: b'{"totalResults":0,"vulnerabilities":[]}'
+        )
+        document = {
+            "hosts": [{"id": "host:192.168.56.104", "address": "192.168.56.104"}],
+            "services": [{"id": "service:[192.168.56.104]:tcp:445", "cpes": []}],
+        }
+
+        result = check_scan_document(document, client=client)
+
+        self.assertFalse(any(m.service_id.startswith("os:[") for m in result.matches))
+
     def test_all_services_with_clean_cpes_is_complete_and_clean(self) -> None:
         client = NvdClient(
             transport=lambda _request, _timeout, _limit: b'{"totalResults":0,"vulnerabilities":[]}'

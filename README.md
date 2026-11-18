@@ -341,6 +341,27 @@ If an authorized host does not answer discovery probes, add `-Pn` to
 `scan plan` or `scan run` to tell Nmap to treat the target as online. Preview
 the resulting command with `scan plan` before running it.
 
+To fingerprint the operating system, add `-O`/`--os-detection` to a scanning
+profile (not `discovery`). HexPath records any operating-system CPE Nmap
+reports (for example `cpe:/o:microsoft:windows_xp`) on the host, so hosts that
+expose no version-bearing service — Windows SMB/RPC, typically — can still be
+enriched and scored:
+
+```sh
+sudo hexpath scan run \
+  --scope examples/lab-scope.example.json \
+  --profile services -Pn -O \
+  192.168.56.101 > scan-with-os.json
+```
+
+Nmap OS detection needs raw-socket access, so `-O` requires running HexPath
+with elevated privileges (for example `sudo .venv/bin/hexpath ...`). An
+operating-system CPE carries **no patch level**, so HexPath preserves it as
+host inventory and evidence but does not query CVEs or create attack-graph
+routes from it. Use version-pinned service evidence and observed access effects
+when assessing a route; an OS fingerprint alone is not evidence that a host is
+unpatched or reachable through an exploit.
+
 When a scan is actually run from an already reached host, record that host as
 the vantage point:
 

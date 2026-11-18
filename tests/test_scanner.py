@@ -67,6 +67,46 @@ class NmapCommandTests(unittest.TestCase):
         self.assertEqual(command.targets, ("2001:db8:1::/80",))
         self.assertIn("--version-light", command.arguments)
 
+    def test_os_fingerprint_uses_only_the_best_match_cpes(self) -> None:
+        # Nmap lists osmatch candidates highest-accuracy first. Only the best
+        # one's CPEs should be kept, not a mix from every lower guess.
+        result = parse_nmap_xml(
+            """<nmaprun start="1791509400"><host>
+              <status state="up" reason="arp-response"/>
+              <address addr="192.0.2.23" addrtype="ipv4"/>
+              <os>
+                <osmatch name="Microsoft Windows 10 1909" accuracy="96">
+                  <osclass><cpe>cpe:/o:microsoft:windows_10</cpe></osclass>
+                </osmatch>
+                <osmatch name="Microsoft Windows Server 2019" accuracy="88">
+                  <osclass><cpe>cpe:/o:microsoft:windows_server_2019</cpe></osclass>
+                </osmatch>
+              </os>
+            </host></nmaprun>""",
+        )
+        host = result.hosts[0]
+        self.assertEqual(host.os_name, "Microsoft Windows 10 1909")
+        self.assertEqual(host.cpes, ("cpe:/o:microsoft:windows_10",))
+
+    def test_os_detection_flag_appends_capital_o(self) -> None:
+        command = build_nmap_command(
+            self.scope,
+            ["2001:db8:1::10/128"],
+            ScanProfile.SERVICES,
+            skip_discovery=True,
+            os_detection=True,
+        )
+        self.assertIn("-O", command.arguments)
+
+    def test_os_detection_rejected_for_discovery_profile(self) -> None:
+        with self.assertRaisesRegex(ScannerError, "OS detection"):
+            build_nmap_command(
+                self.scope,
+                ["2001:db8:1::10/128"],
+                ScanProfile.DISCOVERY,
+                os_detection=True,
+            )
+
     def test_can_skip_discovery_for_filtered_targets(self) -> None:
         command = build_nmap_command(
             self.scope,
@@ -375,6 +415,56 @@ class NmapXmlParserTests(unittest.TestCase):
             result.services[0].record_id,
             "service:[192.0.2.10]:tcp:443",
         )
+
+    def test_parses_os_fingerprint_into_host_cpes(self) -> None:
+        result = parse_nmap_xml(
+            """<nmaprun start="1791509400">
+            <host>
+              <status state="up" reason="arp-response"/>
+              <address addr="192.0.2.20" addrtype="ipv4"/>
+              <ports>
+                <port protocol="tcp" portid="445">
+                  <state state="open" reason="syn-ack"/>
+                  <service name="microsoft-ds"/>
+                </port>
+              </ports>
+              <os>
+                <osmatch name="Microsoft Windows XP SP3" accuracy="98">
+                  <osclass vendor="Microsoft" osfamily="Windows">
+                    <cpe>cpe:/o:microsoft:windows_xp</cpe>
+                  </osclass>
+                </osmatch>
+              </os>
+            </host>
+            </nmaprun>""",
+            reference="os-fixture.xml",
+        )
+
+        host = result.hosts[0]
+        self.assertEqual(host.os_name, "Microsoft Windows XP SP3")
+        self.assertEqual(host.cpes, ("cpe:/o:microsoft:windows_xp",))
+
+    def test_os_parsing_ignores_non_os_cpes_and_absent_block(self) -> None:
+        with_hardware = parse_nmap_xml(
+            """<nmaprun start="1791509400"><host>
+              <status state="up" reason="arp-response"/>
+              <address addr="192.0.2.21" addrtype="ipv4"/>
+              <os><osmatch name="Some Router" accuracy="90">
+                <osclass><cpe>cpe:/h:vendor:router</cpe>
+                <cpe>cpe:/o:vendor:router_os</cpe></osclass>
+              </osmatch></os>
+            </host></nmaprun>""",
+        )
+        self.assertEqual(with_hardware.hosts[0].cpes, ("cpe:/o:vendor:router_os",))
+
+        without_os = parse_nmap_xml(
+            """<nmaprun start="1791509400"><host>
+              <status state="up" reason="arp-response"/>
+              <address addr="192.0.2.22" addrtype="ipv4"/>
+            </host></nmaprun>""",
+        )
+        self.assertIsNone(without_os.hosts[0].os_name)
+        self.assertEqual(without_os.hosts[0].cpes, ())
 
     def test_rejects_address_family_mislabeled_in_xml(self) -> None:
         with self.assertRaisesRegex(NmapParseError, "marked IPV4 is not IPV4"):

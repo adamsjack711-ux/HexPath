@@ -157,12 +157,22 @@ class Host:
 
     address: IPAddress | str
     hostnames: tuple[str, ...] = ()
+    os_name: str | None = None
+    cpes: tuple[str, ...] = ()
     evidence: tuple[Evidence, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "address", _parse_ip(self.address, "host address"))
         hostnames = tuple(_require_text(name, "hostname") for name in self.hostnames)
         object.__setattr__(self, "hostnames", hostnames)
+        if self.os_name is not None:
+            object.__setattr__(self, "os_name", _require_text(self.os_name, "os_name"))
+        # Operating-system CPEs come from Nmap's OS fingerprint, not from a
+        # listening service, so they live on the host rather than on a port.
+        cpes = tuple(_normalize_cpe(cpe) for cpe in self.cpes)
+        if len(cpes) != len(set(cpes)):
+            raise ModelError("host contains duplicate CPE records")
+        object.__setattr__(self, "cpes", cpes)
         object.__setattr__(self, "evidence", tuple(self.evidence))
 
     @property
@@ -174,6 +184,8 @@ class Host:
             "id": self.record_id,
             "address": self.address.compressed,
             "hostnames": list(self.hostnames),
+            "os_name": self.os_name,
+            "cpes": list(self.cpes),
             "evidence": [item.to_dict() for item in self.evidence],
         }
 

@@ -189,6 +189,21 @@ hexpath assess --scope examples/ipv6-assessment/scope.json \
   --cves examples/ipv6-assessment/cves.json --target 2001:db8::10
 ```
 
+### IPv4 objectives
+
+`assess` works the same way for IPv4 targets. The objective's address family
+decides the assessment: give an IPv4 scope and target and HexPath runs IPv4
+service detection (no `-6`) and labels the report **HexPath IPv4 Pentest
+Assessment**. A dual-stack scope is narrowed to the target's family, so one run
+assesses one family at a time. A matching offline example ships under
+`examples/ipv4-assessment/`:
+
+```sh
+hexpath assess --scope examples/ipv4-assessment/scope.json \
+  --scan examples/ipv4-assessment/scan.json \
+  --cves examples/ipv4-assessment/cves.json --target 192.0.2.10
+```
+
 ## Workflow
 
 1. **IPv6 discovery** — Identify live IPv6 hosts within the approved assessment scope.

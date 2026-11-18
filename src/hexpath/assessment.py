@@ -1,8 +1,9 @@
-"""IPv6 assessment summaries for the terminal and saved assessment bundles."""
+"""IPv4 and IPv6 assessment summaries for the terminal and saved bundles."""
 
 from __future__ import annotations
 
 from copy import deepcopy
+import ipaddress
 from typing import Any
 
 from hexpath.graph import ENTRY_NODE_ID, build_attack_graph
@@ -28,7 +29,7 @@ def validate_scans(scope: Scope, documents: list[object]) -> list[dict[str, Any]
                 raise ValueError("host must be an object")
             address = scope.require_authorized(host.get("address"))
             if host.get("id") != f"host:{address}":
-                raise ValueError("host id must match its canonical IPv6 address")
+                raise ValueError("host id must match its canonical address")
         for service in scan["services"]:
             if not isinstance(service, dict):
                 raise ValueError("service must be an object")
@@ -37,7 +38,7 @@ def validate_scans(scope: Scope, documents: list[object]) -> list[dict[str, Any]
                 raise ValueError("service CPEs must be a list of strings")
             address = scope.require_authorized(service.get("host"))
             if service.get("host") != str(address):
-                raise ValueError("service host must use its canonical IPv6 address")
+                raise ValueError("service host must use its canonical address")
         if vantage != ENTRY_NODE_ID and not any(h["id"] == vantage for h in scan["hosts"]):
             scan["hosts"].append(Host(
                 address=vantage.removeprefix("host:"),
@@ -76,6 +77,10 @@ def summarize_assessment(
         raise ValueError(f"source {source!r} has no recorded observations")
     path = graph.shortest_path(source, target) if target in node_ids else None
     target_address = target.removeprefix("host:")
+    # The objective's address family labels the report and its schema id, so an
+    # IPv4 assessment is never mistaken for an IPv6 one (and vice versa).
+    family = ipaddress.ip_address(target_address).version
+    address_family = f"IPv{family}"
     direct = any(
         item["vantage"] == source and item["host"] == target_address
         and item.get("state") == "open" for item in observations
@@ -114,7 +119,8 @@ def summarize_assessment(
         source=source, target_observed=target in node_ids,
     )
     return {
-        "schema_version": "hexpath-ipv6-assessment-v2",
+        "schema_version": f"hexpath-ipv{family}-assessment-v2",
+        "address_family": address_family,
         "scope": {"name": scope.name, "targets": [str(n) for n in scope.networks]},
         "source": source, "target": target,
         "target_observed": target in node_ids,
@@ -263,10 +269,10 @@ def _next_checks(
         actions.append({
             "kind": "confirm_reachability", "service_id": None,
             "action": (
-                f"Recheck the authorized IPv6 target {target_address} from {source}; "
+                f"Recheck the authorized target {target_address} from {source}; "
                 "no open target service was recorded."
                 if target_observed else
-                f"Confirm the IPv6 target seed {target_address} and scan vantage {source}; "
+                f"Confirm the target seed {target_address} and scan vantage {source}; "
                 "the target was not observed."
             ),
         })
@@ -312,7 +318,8 @@ def render_assessment(document: dict[str, Any]) -> str:
         for check in checks
     )
     lines = [
-        "HexPath IPv6 Pentest Assessment", "===============================",
+        f"HexPath {document.get('address_family', 'IPv6')} Pentest Assessment",
+        "===============================",
         f"Scope: {document['scope']['name']}",
         f"Starting point: {document['source']}", f"Objective: {document['target']}",
         "", "AT A GLANCE",

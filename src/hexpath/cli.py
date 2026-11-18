@@ -730,8 +730,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
                     scans[0] = scan_through_jump(scans[0], jump_profile)
                     save_latest_scan(scans[0])
+                jump_scan = scans[0].get("jump_scan")
+                if isinstance(jump_scan, dict):
+                    internal_scan = jump_scan.get("scan")
+                    if internal_scan is not None:
+                        if not isinstance(internal_scan, dict):
+                            raise ValueError("cached jump scan must be a JSON object")
+                        scans.append(internal_scan)
             cves = _read_json_document(args.cves, "CVE") if args.cves else (
-                scans[0].get("cves") if len(scans) == 1 else None
+                scans[0].get("cves") if not args.scan or len(scans) == 1 else None
             )
             if not isinstance(cves, dict):
                 cves = check_scan_documents(

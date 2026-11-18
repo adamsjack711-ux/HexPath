@@ -154,34 +154,19 @@ def scan_through_jump(
         reference=f"ssh-jump:{profile.entry_host}",
         vantage=vantage,
     ).to_dict()
-    merged = deepcopy(scan)
-    existing_hosts = {
-        item.get("address")
-        for item in merged.get("hosts", [])
-        if isinstance(item, dict)
-    }
-    for host in internal["hosts"]:
-        if host["address"] not in existing_hosts:
-            merged.setdefault("hosts", []).append(host)
-            existing_hosts.add(host["address"])
-    existing_services = {
-        item.get("id")
-        for item in merged.get("services", [])
-        if isinstance(item, dict)
-    }
-    for service in internal["services"]:
-        if service["id"] not in existing_services:
-            service["vantage"] = vantage
-            merged.setdefault("services", []).append(service)
-            existing_services.add(service["id"])
-    merged["jump_scan"] = {
+    # Keep the remote result as its own scan document. Flattening it into the
+    # entry scan would discard the document-level vantage and could make the
+    # graph claim that internal services were reached directly by the scanner.
+    updated = deepcopy(scan)
+    updated["jump_scan"] = {
         "completed": True,
         "entry_host": profile.entry_host,
         "targets": list(profile.targets),
         "observed_hosts": len(internal["hosts"]),
+        "scan": internal,
     }
-    merged.pop("cves", None)
-    return merged
+    updated.pop("cves", None)
+    return updated
 
 
 def _text(value: Any, name: str) -> str:

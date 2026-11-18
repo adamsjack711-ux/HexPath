@@ -271,12 +271,10 @@ class PathCliTests(unittest.TestCase):
             "id": "service:2001:db8:64::300:tcp:80",
             "host": "2001:db8:64::300",
             "port": 80,
-            "vantage": "host:192.0.2.10",
         }
-        expanded = {
-            **self.scan,
+        internal_scan = {
+            "vantage": "host:192.0.2.10",
             "hosts": [
-                *self.scan["hosts"],
                 {
                     "id": "host:2001:db8:64::300",
                     "address": "2001:db8:64::300",
@@ -284,8 +282,11 @@ class PathCliTests(unittest.TestCase):
                     "evidence": [],
                 },
             ],
-            "services": [*self.scan["services"], internal_service],
-            "jump_scan": {"completed": True},
+            "services": [internal_service],
+        }
+        expanded = {
+            **self.scan,
+            "jump_scan": {"completed": True, "scan": internal_scan},
         }
         jump_mock.return_value = expanded
         check_mock.return_value.to_dict.return_value = self.cves
@@ -296,6 +297,9 @@ class PathCliTests(unittest.TestCase):
 
         jump_mock.assert_called_once_with(self.scan, profile_mock.return_value)
         self.assertTrue(load_latest_scan()["jump_scan"]["completed"])
+        checked_scans = check_mock.call_args.args[0]
+        self.assertEqual(len(checked_scans), 2)
+        self.assertEqual(checked_scans[1]["vantage"], "host:192.0.2.10")
 
     def test_path_explains_when_no_scan_has_been_saved(self) -> None:
         errors = StringIO()

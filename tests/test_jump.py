@@ -87,8 +87,9 @@ class JumpProfileTests(unittest.TestCase):
         self.assertIn("-6", command[-1])
         self.assertEqual(merged["jump_scan"]["observed_hosts"], 1)
         self.assertEqual(
-            merged["services"][0]["vantage"], "host:192.0.2.10"
+            merged["jump_scan"]["scan"]["vantage"], "host:192.0.2.10"
         )
+        self.assertEqual(merged["services"], [])
 
 
 if __name__ == "__main__":

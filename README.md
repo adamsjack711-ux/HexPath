@@ -69,7 +69,7 @@ For a pre-authorized network behind an SSH jump server, place
 internal targets, SSH identity, pinned known-hosts file, ports, and timeout.
 After `hexpath ENTRY_IP`, the same zero-argument `hexpath path` command performs
 the configured internal scan through that server, caches it, enriches the
-merged evidence, and renders server-to-host paths. SSH is non-interactive and
+separate vantage-aware evidence, and renders server-to-host paths. SSH is non-interactive and
 requires strict host-key verification; arbitrary targets are never inferred.
 The local example server image is under `lab/jump/`.
 

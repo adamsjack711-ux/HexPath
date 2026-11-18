@@ -212,82 +212,54 @@ def compile_path_report(
 
 
 def render_path_report(document: dict[str, Any]) -> str:
-    """Render the highest-ranked candidate paths for terminal use."""
-    paths = document["candidate_paths"]
+    """Render only the highest-ranked vulnerable target for terminal use."""
     coverage = "complete" if document["coverage_complete"] else "incomplete"
+    hosts = document["ranked_hosts"]
     lines = [
-        "HexPath Host Investigation Paths",
-        "================================",
+        "HexPath Recommended Path",
+        "========================",
         f"Starting point: {document['source']}",
         f"CVE lookup coverage: {coverage}",
+        f"Hosts observed: {len(hosts)}",
     ]
-    hosts = document["ranked_hosts"]
-    lines.extend(["", f"Hosts observed: {len(hosts)}", "Host investigation priority (CVE candidates are unconfirmed)"])
-    for host in hosts:
-        best = host["best_candidate"]
-        lead = (
-            f"{best['finding']['cve_id']} on {best['endpoint']['port']}/{best['endpoint']['protocol']}"
-            if best else "no CVE candidate"
-        )
-        lines.append(
-            f"  {host['rank']}. {host['host']} | open services {len(host['open_services'])}"
-            f" | candidates {host['candidate_count']} | {lead}"
-        )
-        for service in host["open_services"][:5]:
-            lines.append(
-                f"     {service['port']}/{service['protocol']}: {_service_identity(service)}"
-            )
-        if len(host["open_services"]) > 5:
-            lines.append(f"     ... {len(host['open_services']) - 5} more open services in JSON")
-        route = host["supported_route"]
-        if route:
-            lines.append(f"     Evidence-backed route: {' -> '.join(route['nodes'])}")
-    if not any(host["supported_route"] for host in hosts):
-        lines.append("No evidence-backed host access route is recorded in these scans.")
-    if not paths:
-        lines.append("No CVE-backed investigation lead was found in the supplied scans.")
-        unmatched = document["observed_services_without_cve_candidates"]
-        if unmatched:
-            lines.extend(["", "Observed open services without CVE candidates"])
-            for service in unmatched:
-                lines.append(
-                    f"  {service['host']}:{service['port']}/{service['protocol']}  "
-                    f"{_service_identity(service)}"
-                )
+    path = document["recommended_path"]
+    if path is None:
+        unmatched_count = len(document["observed_services_without_cve_candidates"])
         lines.extend([
             "",
-            "Run a service-version scan before path analysis when software identities are missing.",
+            "Most vulnerable target: not identified",
+            "No CVE-backed target can be recommended from the available evidence.",
+            f"Open services without a CVE candidate: {unmatched_count}",
+            "Use --json for the complete host and service inventory.",
         ])
         return _render_lines(lines)
 
-    lines.append(f"Investigation leads: {len(paths)}")
-    for path in paths:
-        endpoint = path["endpoint"]
-        finding = path["finding"]
-        score = finding.get("cvss_score")
-        score_label = f"CVSS {score:.1f}" if isinstance(score, (int, float)) else "CVSS unknown"
-        candidate_lines = [
-            "",
-            (
-                f"Lead {path['rank']}: {path['source']} -> "
-                f"{endpoint['host']}:{endpoint['port']}/{endpoint['protocol']}"
-            ),
-            f"  1. Port {endpoint['port']}/{endpoint['protocol']} is {endpoint['state']}",
-            f"     Service: {_service_identity(path['service'])}",
-            f"  2. {finding['cve_id']} | {score_label} | confidence {finding['confidence']}",
-            f"     {finding.get('reason') or 'No match reason supplied.'}",
-            f"  3. Validate the affected version, configuration, and patch state.",
-            f"  4. Run an approved test for {finding['cve_id']} and record the access result.",
-            f"  Priority cost: {path['priority_cost']:.2f}",
-        ]
-        if finding.get("cvss_vector"):
-            candidate_lines.append(f"  Vector: {finding['cvss_vector']}")
-        if finding.get("description"):
-            candidate_lines.append(f"  Summary: {finding['description']}")
-        references = finding.get("references")
-        if isinstance(references, list) and references:
-            candidate_lines.append(f"  Reference: {references[0]}")
-        lines.extend(candidate_lines)
+    endpoint = path["endpoint"]
+    finding = path["finding"]
+    score = finding.get("cvss_score")
+    score_label = f"CVSS {score:.1f}" if isinstance(score, (int, float)) else "CVSS unknown"
+    lines.extend([
+        "",
+        f"Most vulnerable target: {endpoint['host']}",
+        f"Path: {path['source']} -> {endpoint['host']}:{endpoint['port']}/{endpoint['protocol']}",
+        f"  1. Port {endpoint['port']}/{endpoint['protocol']} is {endpoint['state']}",
+        f"     Service: {_service_identity(path['service'])}",
+        f"  2. {finding['cve_id']} | {score_label} | confidence {finding['confidence']}",
+        f"     {finding.get('reason') or 'No match reason supplied.'}",
+        "  3. Validate the affected version, configuration, and patch state.",
+        f"  4. Run an approved test for {finding['cve_id']} and record the access result.",
+        f"  Priority cost: {path['priority_cost']:.2f}",
+    ])
+    if not path["access_evidence_recorded"]:
+        lines.append("  Status: candidate only; access has not been demonstrated.")
+    if finding.get("cvss_vector"):
+        lines.append(f"  Vector: {finding['cvss_vector']}")
+    if finding.get("description"):
+        lines.append(f"  Summary: {finding['description']}")
+    references = finding.get("references")
+    if isinstance(references, list) and references:
+        lines.append(f"  Reference: {references[0]}")
+    lines.append("  Use --json for all lower-ranked hosts and candidates.")
     return _render_lines(lines)
 
 

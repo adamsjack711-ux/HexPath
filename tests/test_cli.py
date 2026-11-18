@@ -158,7 +158,8 @@ class PathCliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         rendered = output.getvalue()
-        self.assertIn("HexPath Host Investigation Paths", rendered)
+        self.assertIn("HexPath Recommended Path", rendered)
+        self.assertIn("Most vulnerable target: 192.0.2.10", rendered)
         self.assertIn("192.0.2.10:22/tcp", rendered)
         self.assertIn("OpenSSH ssh 9.6", rendered)
         self.assertIn("CVE-2024-6387", rendered)
@@ -187,6 +188,36 @@ class PathCliTests(unittest.TestCase):
         self.assertEqual(report["ranked_hosts"][0]["candidate_count"], 1)
         self.assertIsNone(report["ranked_hosts"][0]["supported_route"])
         self.assertIsNone(report["ranked_hosts"][1]["priority_cost"])
+
+    def test_terminal_path_prints_only_the_highest_ranked_candidate(self) -> None:
+        second = {
+            "id": "CVE-2024-0001",
+            "description": "Lower ranked synthetic candidate.",
+            "cvss_score": 4.0,
+            "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:H/UI:R/S:U/C:L/I:N/A:N",
+            "references": ["https://example.test/CVE-2024-0001"],
+        }
+        cves = {
+            **self.cves,
+            "vulnerabilities": [*self.cves["vulnerabilities"], second],
+            "matches": [
+                *self.cves["matches"],
+                {
+                    **self.cves["matches"][0],
+                    "cve_id": second["id"],
+                },
+            ],
+        }
+        save_latest_scan({**self.scan, "cves": cves})
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(["path"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(output.getvalue().count("Path:"), 1)
+        self.assertIn("CVE-2024-6387", output.getvalue())
+        self.assertNotIn("CVE-2024-0001", output.getvalue())
 
     def test_path_shows_route_only_with_observed_access_evidence(self) -> None:
         observed = {"source": "school-lab", "summary": "Observed access effect in VM", "level": "observed", "collected_at": "2026-11-18T00:00:00+00:00", "reference": "fixture.json"}
@@ -326,6 +357,8 @@ class PathCliTests(unittest.TestCase):
                     exit_code = main(["path"])
                 self.assertEqual(exit_code, 1)
                 self.assertIn(f"CVE lookup coverage: {label}", output.getvalue().splitlines())
+                self.assertIn("Most vulnerable target: not identified", output.getvalue())
+                self.assertNotIn("Observed open services without CVE candidates", output.getvalue())
 
     def test_failed_save_preserves_previous_scan_and_removes_temporary_file(self) -> None:
         saved_path = save_latest_scan(self.scan)

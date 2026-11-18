@@ -334,6 +334,8 @@ class Ipv4AssessmentTests(unittest.TestCase):
         )
         rendered = render_assessment(result)
         self.assertIn("HexPath IPv4 Pentest Assessment", rendered)
+        self.assertIn("Record the IPv4 addresses", rendered)
+        self.assertNotIn("Record the IPv6 addresses", rendered)
         self.assertIn("access: UNVERIFIED", rendered)
 
 

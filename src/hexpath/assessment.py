@@ -117,6 +117,7 @@ def summarize_assessment(
     next_checks = _next_checks(
         observations, modeled_matches, checks, target_address=target_address,
         source=source, target_observed=target in node_ids,
+        address_family=address_family,
     )
     return {
         "schema_version": f"hexpath-ipv{family}-assessment-v2",
@@ -208,7 +209,7 @@ def _modeled_matches(
 def _next_checks(
     observations: list[dict[str, Any]], matches: list[dict[str, Any]],
     checks: list[dict[str, Any]], *, target_address: str, source: str,
-    target_observed: bool,
+    target_observed: bool, address_family: str,
 ) -> list[dict[str, Any]]:
     """Turn target-specific evidence gaps into ordered, bounded follow-ups."""
     actions: list[dict[str, Any]] = []
@@ -279,7 +280,8 @@ def _next_checks(
     actions.append({
         "kind": "record_probe_coverage", "service_id": None,
         "action": (
-            f"Record the IPv6 addresses, TCP/UDP ports, and vantage actually tested "
+            f"Record the {address_family} addresses, TCP/UDP ports, and vantage "
+            "actually tested "
             f"from {source}; observed services do not establish full scan coverage."
         ),
     })

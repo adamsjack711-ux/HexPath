@@ -14,13 +14,17 @@ import sys
 
 from hexpath.scanner import ScanProfile, ScannerError, build_nmap_command, parse_nmap_xml, run_nmap
 from hexpath.scope import Scope, ScopeError
+from hexpath.state import save_latest_scan
 from hexpath.vulnerabilities import NvdClient, VulnerabilityError, check_scan_documents
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="hexpath", description="Scan a target; add flags for more information.",
-        epilog="Advanced commands remain available: hexpath scan, scope, cve, graph, assess.",
+        epilog=(
+            "After a scan, run 'hexpath path' to compile ports and CVEs. "
+            "Advanced commands remain available: hexpath scan, scope, cve, graph, assess."
+        ),
     )
     parser.add_argument("targets", nargs="+", metavar="TARGET", help="IP, hostname, or scoped CIDR")
     parser.add_argument("-sV", "--services", action="store_true", help="detect service versions")
@@ -132,6 +136,7 @@ def main(argv: list[str]) -> int:
             document["cves"] = check_scan_documents(
                 [result.to_dict()], client=NvdClient(api_key=os.environ.get("NVD_API_KEY")),
             ).to_dict()
+        save_latest_scan(document)
         serialized = json.dumps(document, indent=2, sort_keys=True)
         if args.output:
             Path(args.output).write_text(serialized + "\n", encoding="utf-8")

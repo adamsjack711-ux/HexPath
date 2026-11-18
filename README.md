@@ -24,6 +24,7 @@ hexpath 192.0.2.10 -sV -p-             # versions on all TCP ports
 hexpath 192.0.2.10 -Pn                # target is online but discovery fails
 hexpath 2001:db8::10 -sV -o scan.json  # save normalized scan JSON
 hexpath lab.example -sV --plan        # resolve and preview, without scanning
+hexpath path                          # compile the latest scan into candidate paths
 ```
 
 IPv4 and IPv6 literals are detected automatically; use `-6` to select an IPv6
@@ -41,6 +42,15 @@ scan timeout is five minutes; adjust it with `--timeout SECONDS`.
 Run `hexpath` or `hexpath --help` for these options. The existing `scan`,
 `scope`, `cve`, `graph`, and `assess` commands remain available unchanged.
 
+Every completed target-first scan and `hexpath scan run` stores its normalized
+result as Hexpath's latest scan. Run `hexpath path` afterward with no additional
+arguments. Hexpath reuses embedded CVE results when the scan included `--cves`,
+or performs CVE enrichment from the saved service identities when needed. The
+report ranks candidate paths by the observed host and port, detected service and
+version, CVE severity and match confidence. Each path ends with the validation
+and authorized test that must be recorded before treating the candidate as an
+access result. `hexpath path --json` prints the same report as structured data.
+
 ## Project status
 
 HexPath currently provides:
@@ -56,6 +66,8 @@ HexPath currently provides:
 - Operator-selected targets and ranked comparison of evidence-backed, loop-free routes.
 - Versioned 0–100 network exposure scoring with transparent component evidence.
 - A target-led `assess` command with a terminal summary and optional JSON evidence bundle.
+- A zero-argument `path` command that compiles the latest scan into ranked port,
+  service, CVE, and validation steps.
 
 ## IPv6 pentest workflow in the CLI
 

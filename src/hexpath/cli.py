@@ -41,8 +41,11 @@ from hexpath.scanner import (
     scan_levels_document,
     scan_profile_for_level,
 )
+from hexpath.jump import load_jump_profile, scan_through_jump
+from hexpath.path_report import compile_path_report, render_path_report
 from hexpath.scope import Scope, ScopeError
 from hexpath.setup import SetupError, find_nmap, setup_nmap, verify_nmap
+from hexpath.state import load_latest_scan, save_latest_scan
 from hexpath.vulnerabilities import (
     CpeIdentity,
     NvdClient,
@@ -99,6 +102,35 @@ def build_parser() -> argparse.ArgumentParser:
         "--check",
         action="store_true",
         help="check Nmap without installing it",
+    )
+
+    path_parser = subcommands.add_parser(
+        "path",
+        help="compile the latest scan into ranked candidate paths",
+    )
+    path_parser.add_argument(
+        "-j",
+        "--json",
+        action="store_true",
+        help="print machine-readable path data",
+    )
+    path_parser.add_argument(
+        "-o",
+        "--output",
+        help="save the compiled path report as JSON",
+    )
+    path_parser.add_argument(
+        "--scan", action="append", default=[],
+        help="saved scan JSON; repeat to combine observations from multiple hosts",
+    )
+    path_parser.add_argument(
+        "--cves", help="saved CVE results for offline path analysis",
+    )
+    path_parser.add_argument(
+        "--cve-timeout",
+        type=float,
+        default=30,
+        help="maximum time for each NVD request in seconds",
     )
 
     scope_parser = subcommands.add_parser(
@@ -660,7 +692,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run HexPath and return a process exit code."""
     arguments = list(sys.argv[1:] if argv is None else argv)
     commands = {
-        "setup", "scope", "sc", "scan", "s", "cve", "c", "graph", "g", "assess",
+        "setup", "scope", "sc", "scan", "s", "cve", "c", "graph", "g", "assess", "path",
     }
     if not arguments or arguments[0] not in commands | {"-V", "--version"}:
         from hexpath.direct_cli import main as direct_main
@@ -681,6 +713,50 @@ def main(argv: Sequence[str] | None = None) -> int:
             action = "installed" if result.installed else "already available"
             print(f"Nmap {action}: {result.version} ({result.path})")
             return 0
+        if args.command == "path":
+            scans = _read_json_documents(args.scan, "scan") if args.scan else [load_latest_scan()]
+            if any(not isinstance(scan, dict) for scan in scans):
+                raise ValueError("each scan JSON must be an object")
+            if not args.scan:
+                jump_profile = load_jump_profile(scans[0])
+                jump_scan = scans[0].get("jump_scan")
+                if jump_profile is not None and not (
+                    isinstance(jump_scan, dict) and jump_scan.get("completed") is True
+                ):
+                    print(
+                        f"Scanning configured internal targets through {jump_profile.entry_host}…",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    scans[0] = scan_through_jump(scans[0], jump_profile)
+                    save_latest_scan(scans[0])
+                jump_scan = scans[0].get("jump_scan")
+                if isinstance(jump_scan, dict):
+                    internal_scan = jump_scan.get("scan")
+                    if internal_scan is not None:
+                        if not isinstance(internal_scan, dict):
+                            raise ValueError("cached jump scan must be a JSON object")
+                        scans.append(internal_scan)
+            cves = _read_json_document(args.cves, "CVE") if args.cves else (
+                scans[0].get("cves") if not args.scan or len(scans) == 1 else None
+            )
+            if not isinstance(cves, dict):
+                cves = check_scan_documents(
+                    scans,
+                    client=NvdClient(
+                        timeout_seconds=args.cve_timeout,
+                        api_key=os.environ.get("NVD_API_KEY"),
+                    ),
+                ).to_dict()
+                if not args.scan:
+                    scans[0]["cves"] = cves
+                    save_latest_scan(scans[0])
+            report = compile_path_report(scans, cves)
+            serialized = json.dumps(report, indent=2, sort_keys=True)
+            if args.output:
+                Path(args.output).write_text(serialized + "\n", encoding="utf-8")
+            print(serialized if args.json else render_path_report(report))
+            return 0 if report["candidate_paths"] else 1
         if args.command == "assess":
             scope = Scope.from_json_file(args.scope)
             # The objective's address family decides whether this is an IPv4 or
@@ -766,7 +842,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 reference="live-nmap",
                 vantage=vantage,
             )
-            print(result.to_json())
+            document = result.to_dict()
+            save_latest_scan(document)
+            print(json.dumps(document, indent=2, sort_keys=True))
             return 0
         if args.command == "scan" and args.scan_command == "confirm-mongodb":
             scope = Scope.from_json_file(args.scope)

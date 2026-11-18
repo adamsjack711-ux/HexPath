@@ -3,6 +3,7 @@
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 import json
+import os
 from pathlib import Path
 import socket
 import tempfile
@@ -10,12 +11,23 @@ import unittest
 from unittest.mock import patch
 
 from hexpath.cli import main
+from hexpath.state import load_latest_scan
 from hexpath.vulnerabilities import ScanVulnerabilityResult
 
 FIXTURE = (Path(__file__).parent / "fixtures/nmap_ipv6_sample.xml").read_text()
 
 
 class DirectCliTests(unittest.TestCase):
+    def setUp(self):
+        self.state_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.state_directory.cleanup)
+        state_environment = patch.dict(
+            os.environ,
+            {"HEXPATH_STATE_DIR": self.state_directory.name},
+        )
+        state_environment.start()
+        self.addCleanup(state_environment.stop)
+
     def call(self, arguments):
         stdout, stderr = StringIO(), StringIO()
         with redirect_stdout(stdout), redirect_stderr(stderr):
@@ -108,6 +120,7 @@ class DirectCliTests(unittest.TestCase):
         self.assertIn("hosts", document)
         self.assertIn("services", document)
         self.assertEqual(document["scope"]["targets"], ["2001:db8:1::10/128"])
+        self.assertEqual(load_latest_scan(), document)
         self.assertIn("Scanning", error)
 
     @patch("hexpath.direct_cli.run_nmap")
@@ -116,4 +129,5 @@ class DirectCliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("TARGET", output)
         self.assertIn("--cves", output)
+        self.assertIn("hexpath path", output)
         run.assert_not_called()

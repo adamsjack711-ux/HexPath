@@ -1,8 +1,8 @@
 # HexPath
 
-An IPv6-focused network penetration-testing tool for lab practice and authorized engagements.
+An IPv6-focused network penetration-testing school project for controlled lab VMs.
 
-HexPath helps a network pentester answer: **from my current position, what is exposed over IPv6, and which potential path toward my target should I investigate?** It connects scoped service discovery, CVE candidates, and observations from multiple scan origins into an evidence-backed CLI assessment. This is our school group project; modeled paths guide investigation and do not establish successful exploitation.
+HexPath helps a network pentester answer: **from my current position, what is exposed over IPv6, which hosts merit investigation, and which modeled routes toward my target have supporting evidence?** It connects scoped service discovery, CVE candidates, and observations from multiple scan origins into an evidence-backed CLI assessment. This school group project is intended for safe, isolated VM labs. Modeled routes guide investigation and do not establish successful exploitation.
 
 ## Quick start
 
@@ -24,6 +24,7 @@ hexpath 192.0.2.10 -sV -p-             # versions on all TCP ports
 hexpath 192.0.2.10 -Pn                # target is online but discovery fails
 hexpath 2001:db8::10 -sV -o scan.json  # save normalized scan JSON
 hexpath lab.example -sV --plan        # resolve and preview, without scanning
+hexpath path                          # compile the latest scan into candidate paths
 ```
 
 IPv4 and IPv6 literals are detected automatically; use `-6` to select an IPv6
@@ -41,6 +42,37 @@ scan timeout is five minutes; adjust it with `--timeout SECONDS`.
 Run `hexpath` or `hexpath --help` for these options. The existing `scan`,
 `scope`, `cve`, `graph`, and `assess` commands remain available unchanged.
 
+Every completed target-first scan and `hexpath scan run` stores its normalized
+result as Hexpath's latest scan. Run `hexpath path` afterward with no additional
+arguments. The command ranks all observed hosts for investigation using their
+open services and CVE candidates. It orders candidates by CVSS severity and
+match confidence, and keeps hosts with no CVE candidate visible. A candidate is
+an investigation lead, not a confirmed vulnerability or a route into a host.
+Only recorded, observed access effects create an evidence-backed host route.
+The JSON output includes the supporting route edges and evidence.
+
+To combine saved observations from different positions in a school lab VM,
+repeat `--scan`. Provide saved CVE results with `--cves` for an entirely offline
+report; otherwise Hexpath performs CVE lookups for the combined scans:
+
+```sh
+hexpath path --scan entry-scan.json --scan second-vantage-scan.json \
+  --cves lab-cves.json --json
+```
+
+`hexpath path --json` prints structured results, and `-o report.json` saves
+them. The default no-argument form reuses embedded CVE results when available.
+
+For a pre-authorized network behind an SSH jump server, place
+`jump-profile.json` beside the saved state file (the directory selected by
+`HEXPATH_STATE_DIR`). The profile binds one scanned entry address to the exact
+internal targets, SSH identity, pinned known-hosts file, ports, and timeout.
+After `hexpath ENTRY_IP`, the same zero-argument `hexpath path` command performs
+the configured internal scan through that server, caches it, enriches the
+separate vantage-aware evidence, and renders server-to-host paths. SSH is non-interactive and
+requires strict host-key verification; arbitrary targets are never inferred.
+The local example server image is under `lab/jump/`.
+
 ## Project status
 
 HexPath currently provides:
@@ -56,6 +88,8 @@ HexPath currently provides:
 - Operator-selected targets and ranked comparison of evidence-backed, loop-free routes.
 - Versioned 0–100 network exposure scoring with transparent component evidence.
 - A target-led `assess` command with a terminal summary and optional JSON evidence bundle.
+- A zero-argument `path` command that compiles the latest scan into ranked port,
+  service, CVE, and validation steps.
 
 ## IPv6 pentest workflow in the CLI
 

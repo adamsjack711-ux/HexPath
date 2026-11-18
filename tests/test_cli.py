@@ -5,14 +5,17 @@ from __future__ import annotations
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from hexpath.cli import build_parser, main
+from hexpath.path_report import compile_path_report
 from hexpath.scanner import NmapScanResult
 from hexpath.setup import NmapSetupResult
+from hexpath.state import load_latest_scan, save_latest_scan
 from hexpath.vulnerabilities import (
     CpeIdentity,
     CpeVulnerabilityResult,
@@ -77,6 +80,261 @@ class CompactCliTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 0)
         self.assertEqual(output.getvalue(), "hexpath 0.1.1\n")
 
+    def test_path_is_a_top_level_command_with_no_required_arguments(self) -> None:
+        parsed = build_parser().parse_args(["path"])
+
+        self.assertEqual(parsed.command, "path")
+
+
+class PathCliTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary_directory.cleanup)
+        state_environment = patch.dict(
+            os.environ,
+            {"HEXPATH_STATE_DIR": self.temporary_directory.name},
+        )
+        state_environment.start()
+        self.addCleanup(state_environment.stop)
+        self.scan = {
+            "vantage": "entry:scanner",
+            "hosts": [
+                {
+                    "id": "host:192.0.2.10",
+                    "address": "192.0.2.10",
+                    "hostnames": ["lab.example"],
+                    "evidence": [],
+                }
+            ],
+            "services": [
+                {
+                    "id": "service:192.0.2.10:tcp:22",
+                    "host": "192.0.2.10",
+                    "port": 22,
+                    "protocol": "tcp",
+                    "state": "open",
+                    "name": "ssh",
+                    "product": "OpenSSH",
+                    "version": "9.6",
+                    "cpes": ["cpe:/a:openbsd:openssh:9.6"],
+                    "evidence": [],
+                }
+            ],
+            "scope": {"name": "lab", "targets": ["192.0.2.10/32"]},
+        }
+        self.cves = {
+            "completed": True,
+            "coverage": {
+                "services": 1,
+                "cpe_checks": 1,
+                "completed_cpe_checks": 1,
+            },
+            "vulnerabilities": [
+                {
+                    "id": "CVE-2024-6387",
+                    "description": "Synthetic regression candidate.",
+                    "cvss_score": 8.1,
+                    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                    "references": ["https://example.test/CVE-2024-6387"],
+                }
+            ],
+            "matches": [
+                {
+                    "service_id": "service:192.0.2.10:tcp:22",
+                    "cve_id": "CVE-2024-6387",
+                    "confidence": "medium",
+                    "reason": "Exact version candidate.",
+                    "evidence": [],
+                }
+            ],
+        }
+
+    def test_path_uses_the_latest_scan_without_required_arguments(self) -> None:
+        save_latest_scan({**self.scan, "cves": self.cves})
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(["path"])
+
+        self.assertEqual(exit_code, 0)
+        rendered = output.getvalue()
+        self.assertIn("HexPath Host Investigation Paths", rendered)
+        self.assertIn("192.0.2.10:22/tcp", rendered)
+        self.assertIn("OpenSSH ssh 9.6", rendered)
+        self.assertIn("CVE-2024-6387", rendered)
+        self.assertIn("approved test", rendered)
+
+    def test_path_ranks_multiple_saved_hosts_without_inventing_access(self) -> None:
+        second = {
+            **self.scan,
+            "hosts": [{"id": "host:192.0.2.20", "address": "192.0.2.20", "hostnames": []}],
+            "services": [{**self.scan["services"][0], "id": "service:192.0.2.20:tcp:443", "host": "192.0.2.20", "port": 443}],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            first_file = Path(directory) / "first.json"
+            second_file = Path(directory) / "second.json"
+            cve_file = Path(directory) / "cves.json"
+            first_file.write_text(json.dumps(self.scan), encoding="utf-8")
+            second_file.write_text(json.dumps(second), encoding="utf-8")
+            cve_file.write_text(json.dumps(self.cves), encoding="utf-8")
+            output = StringIO()
+            with redirect_stdout(output):
+                exit_code = main(["path", "--scan", str(first_file), "--scan", str(second_file), "--cves", str(cve_file), "--json"])
+
+        report = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual([host["host"] for host in report["ranked_hosts"]], ["192.0.2.10", "192.0.2.20"])
+        self.assertEqual(report["ranked_hosts"][0]["candidate_count"], 1)
+        self.assertIsNone(report["ranked_hosts"][0]["supported_route"])
+        self.assertIsNone(report["ranked_hosts"][1]["priority_cost"])
+
+    def test_path_shows_route_only_with_observed_access_evidence(self) -> None:
+        observed = {"source": "school-lab", "summary": "Observed access effect in VM", "level": "observed", "collected_at": "2026-11-18T00:00:00+00:00", "reference": "fixture.json"}
+        cves = json.loads(json.dumps(self.cves))
+        cves["matches"][0].update({
+            "evidence": [observed], "access_supported": True,
+            "access_basis": "Observed in school VM", "access_evidence": [observed],
+        })
+        save_latest_scan({**self.scan, "cves": cves})
+        output = StringIO()
+        with redirect_stdout(output):
+            exit_code = main(["path", "--json"])
+        report = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(report["ranked_hosts"][0]["supported_route"]["nodes"][-1], "host:192.0.2.10")
+
+    def test_path_links_two_vantages_into_a_host_route(self) -> None:
+        observed = {"source": "school-lab", "summary": "Observed access effect in VM", "level": "observed", "collected_at": "2026-11-18T00:00:00+00:00", "reference": "fixture.json"}
+        first = json.loads(json.dumps(self.scan))
+        second = {
+            "vantage": "host:192.0.2.10",
+            "hosts": [{"id": "host:192.0.2.20", "address": "192.0.2.20", "hostnames": []}],
+            "services": [{**first["services"][0], "id": "service:192.0.2.20:tcp:443", "host": "192.0.2.20", "port": 443, "evidence": [observed]}],
+        }
+        cves = json.loads(json.dumps(self.cves))
+        cves["matches"][0].update({"evidence": [observed], "access_supported": True, "access_basis": "Observed in VM", "access_evidence": [observed]})
+        cves["matches"].append({**cves["matches"][0], "service_id": "service:192.0.2.20:tcp:443"})
+        report = compile_path_report([first, second], cves)
+        route = next(host["supported_route"] for host in report["ranked_hosts"] if host["host"] == "192.0.2.20")
+        self.assertEqual(route["nodes"], ["entry:scanner", "service:192.0.2.10:tcp:22", "host:192.0.2.10", "service:192.0.2.20:tcp:443", "host:192.0.2.20"])
+
+    def test_path_json_preserves_ranked_endpoint_and_cve_details(self) -> None:
+        save_latest_scan({**self.scan, "cves": self.cves})
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(["path", "--json"])
+
+        report = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(report["recommended_path"]["endpoint"]["port"], 22)
+        self.assertEqual(
+            report["recommended_path"]["finding"]["cve_id"],
+            "CVE-2024-6387",
+        )
+
+    def test_path_sanitizes_scan_and_cve_text_for_the_terminal(self) -> None:
+        self.scan["services"][0]["product"] = "OpenSSH\x1b[2J\nFAKE PATH"
+        self.cves["matches"][0]["reason"] = "candidate\x1b[2J\nFAKE PATH"
+        save_latest_scan({**self.scan, "cves": self.cves})
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(["path"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertNotIn("\x1b", output.getvalue())
+        self.assertNotIn("\nFAKE PATH", output.getvalue())
+
+    @patch("hexpath.cli.check_scan_documents")
+    def test_path_enriches_and_caches_a_scan_without_cves(self, check_mock) -> None:
+        save_latest_scan(self.scan)
+        check_mock.return_value.to_dict.return_value = self.cves
+
+        with redirect_stdout(StringIO()):
+            exit_code = main(["path"])
+
+        self.assertEqual(exit_code, 0)
+        check_mock.assert_called_once()
+        self.assertEqual(load_latest_scan()["cves"], self.cves)
+
+    @patch("hexpath.cli.scan_through_jump")
+    @patch("hexpath.cli.load_jump_profile")
+    @patch("hexpath.cli.check_scan_documents")
+    def test_path_scans_configured_jump_once_before_compiling(
+        self, check_mock, profile_mock, jump_mock
+    ) -> None:
+        save_latest_scan(self.scan)
+        profile_mock.return_value.entry_host = "192.0.2.10"
+        internal_service = {
+            **self.scan["services"][0],
+            "id": "service:2001:db8:64::300:tcp:80",
+            "host": "2001:db8:64::300",
+            "port": 80,
+        }
+        internal_scan = {
+            "vantage": "host:192.0.2.10",
+            "hosts": [
+                {
+                    "id": "host:2001:db8:64::300",
+                    "address": "2001:db8:64::300",
+                    "hostnames": [],
+                    "evidence": [],
+                },
+            ],
+            "services": [internal_service],
+        }
+        expanded = {
+            **self.scan,
+            "jump_scan": {"completed": True, "scan": internal_scan},
+        }
+        jump_mock.return_value = expanded
+        check_mock.return_value.to_dict.return_value = self.cves
+
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            main(["path"])
+            main(["path"])
+
+        jump_mock.assert_called_once_with(self.scan, profile_mock.return_value)
+        self.assertTrue(load_latest_scan()["jump_scan"]["completed"])
+        checked_scans = check_mock.call_args.args[0]
+        self.assertEqual(len(checked_scans), 2)
+        self.assertEqual(checked_scans[1]["vantage"], "host:192.0.2.10")
+
+    def test_path_explains_when_no_scan_has_been_saved(self) -> None:
+        errors = StringIO()
+
+        with redirect_stderr(errors):
+            exit_code = main(["path"])
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("run a Hexpath scan", errors.getvalue())
+
+    def test_no_matches_reports_lookup_coverage(self) -> None:
+        for complete, label in ((False, "incomplete"), (True, "complete")):
+            with self.subTest(complete=complete):
+                cves = {
+                    **self.cves,
+                    "completed": complete,
+                    "coverage": {**self.cves["coverage"], "completed_cpe_checks": int(complete)},
+                    "matches": [],
+                    "vulnerabilities": [],
+                }
+                save_latest_scan({**self.scan, "cves": cves})
+                output = StringIO()
+                with redirect_stdout(output):
+                    exit_code = main(["path"])
+                self.assertEqual(exit_code, 1)
+                self.assertIn(f"CVE lookup coverage: {label}", output.getvalue().splitlines())
+
+    def test_failed_save_preserves_previous_scan_and_removes_temporary_file(self) -> None:
+        saved_path = save_latest_scan(self.scan)
+        with patch("hexpath.state.os.fsync", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                save_latest_scan({**self.scan, "services": []})
+        self.assertEqual(load_latest_scan(), self.scan)
+        self.assertEqual(list(saved_path.parent.iterdir()), [saved_path])
+
 
 class SetupCliTests(unittest.TestCase):
     @patch("hexpath.cli.verify_nmap", return_value="Nmap version 7.99")
@@ -127,6 +385,12 @@ class ScanCliTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
+        state_environment = patch.dict(
+            os.environ,
+            {"HEXPATH_STATE_DIR": self.temporary_directory.name},
+        )
+        state_environment.start()
+        self.addCleanup(state_environment.stop)
         self.scope_path = Path(self.temporary_directory.name) / "scope.json"
         self.scope_path.write_text(
             json.dumps({"name": "test lab", "targets": ["2001:db8:1::/64"]}),

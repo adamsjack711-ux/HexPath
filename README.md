@@ -329,11 +329,11 @@ sudo hexpath scan run \
 
 Nmap OS detection needs raw-socket access, so `-O` requires running HexPath
 with elevated privileges (for example `sudo .venv/bin/hexpath ...`). An
-operating-system CPE carries **no patch level**, so every CVE derived from it
-applies to the whole OS family: HexPath records these as **low-confidence**
-candidates, and they rank below version-pinned service findings. Treat an
-OS-only host score as "worth investigating", not as evidence the host is
-actually unpatched.
+operating-system CPE carries **no patch level**, so HexPath preserves it as
+host inventory and evidence but does not query CVEs or create attack-graph
+routes from it. Use version-pinned service evidence and observed access effects
+when assessing a route; an OS fingerprint alone is not evidence that a host is
+unpatched or reachable through an exploit.
 
 When a scan is actually run from an already reached host, record that host as
 the vantage point:

@@ -1310,37 +1310,13 @@ class OsFindingGraphTests(unittest.TestCase):
         }
         return scan, cves
 
-    def test_os_finding_makes_a_versionless_host_scorable(self) -> None:
+    def test_os_inventory_cannot_create_an_access_path(self) -> None:
         scan, cves = self._os_scan_and_cves()
-        graph = build_attack_graph(scan, cves)
 
-        # The synthetic OS node is reachable from the entry and leads to the host.
-        os_nodes = [n for n in graph.nodes if n.node_id == "os:[192.168.56.101]"]
-        self.assertEqual(len(os_nodes), 1)
-        self.assertEqual(os_nodes[0].kind, NodeKind.SERVICE)
-        self.assertIn("Windows XP", os_nodes[0].label)
-
-        score = graph.host_exposure(ENTRY_NODE_ID, "host:192.168.56.101")
-        self.assertGreater(score.network_score, 0.0)
-        self.assertEqual(score.observations["exploit_edges"], 1)
-
-        path = graph.shortest_path(ENTRY_NODE_ID, "host:192.168.56.101")
-        self.assertEqual(
-            path.nodes,
-            (ENTRY_NODE_ID, "os:[192.168.56.101]", "host:192.168.56.101"),
-        )
-        self.assertEqual(path.edges[-1].metadata["confidence"], "low")
-
-    def test_os_match_for_unknown_host_is_rejected(self) -> None:
-        scan, cves = self._os_scan_and_cves()
-        cves["matches"][0]["service_id"] = "os:[203.0.113.9]"
-        with self.assertRaisesRegex(GraphError, "unknown host"):
-            build_attack_graph(scan, cves)
-
-    def test_malformed_os_finding_identifier_is_rejected(self) -> None:
-        scan, cves = self._os_scan_and_cves()
-        cves["matches"][0]["service_id"] = "os:[]"
-        with self.assertRaisesRegex(GraphError, "unknown service|malformed OS finding"):
+        # A broad, versionless OS fingerprint is inventory evidence. It is not
+        # a listening service or observed access effect, so it must never be
+        # accepted as the source of an exploit edge.
+        with self.assertRaisesRegex(GraphError, "unknown service"):
             build_attack_graph(scan, cves)
 
 

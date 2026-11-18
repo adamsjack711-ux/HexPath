@@ -646,13 +646,12 @@ class ScanVulnerabilityTests(unittest.TestCase):
                          CpeIdentity("cpe:/a:openbsd:openssh:9.6").value)
         self.assertIn("local patch status must be verified", result.matches[0].reason)
 
-    def test_host_os_cpes_are_checked_as_low_confidence_os_findings(self) -> None:
-        response = {
-            "totalResults": 1,
-            "vulnerabilities": [{"cve": {"id": "CVE-2008-4250"}}],
-        }
+    def test_host_os_cpes_remain_inventory_only(self) -> None:
+        def unexpected_transport(*_args):
+            raise AssertionError("inventory-only OS CPE must not be queried")
+
         client = NvdClient(
-            transport=lambda _request, _timeout, _limit: json.dumps(response).encode()
+            transport=unexpected_transport
         )
         document = {
             "hosts": [
@@ -670,13 +669,13 @@ class ScanVulnerabilityTests(unittest.TestCase):
 
         result = check_scan_document(document, client=client)
 
-        self.assertEqual(result.status, VulnerabilityStatus.VULNERABLE)
-        os_matches = [m for m in result.matches if m.service_id.startswith("os:[")]
-        self.assertEqual(len(os_matches), 1)
-        self.assertEqual(os_matches[0].service_id, "os:[192.168.56.101]")
-        self.assertEqual(os_matches[0].cve_id, "CVE-2008-4250")
-        self.assertEqual(os_matches[0].confidence.value, "low")
-        self.assertIn("no patch level", os_matches[0].reason)
+        self.assertEqual(result.status, VulnerabilityStatus.UNKNOWN)
+        self.assertEqual(result.vulnerabilities, ())
+        self.assertEqual(result.matches, ())
+        self.assertEqual(
+            result.unmatched_services,
+            ("service:[192.168.56.101]:tcp:445",),
+        )
 
     def test_host_without_os_cpes_adds_no_os_finding(self) -> None:
         client = NvdClient(

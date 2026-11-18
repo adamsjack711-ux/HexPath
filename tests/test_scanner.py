@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import json
 import subprocess
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -18,6 +19,7 @@ from hexpath.scanner import (
     build_nmap_command,
     parse_nmap_xml,
     require_authorized_vantage,
+    resolve_nmap_executable,
     run_nmap,
     scan_levels_document,
     scan_profile_for_level,
@@ -261,7 +263,7 @@ class NmapRunnerTests(unittest.TestCase):
 
         self.assertEqual(output, "<nmaprun/>")
         run_mock.assert_called_once_with(
-            command.arguments,
+            ("/usr/bin/nmap", *command.arguments[1:]),
             capture_output=True,
             check=False,
             text=True,
@@ -285,6 +287,42 @@ class NmapRunnerTests(unittest.TestCase):
 
         with self.assertRaisesRegex(NmapExecutionError, "bad target"):
             run_nmap(command)
+
+    @patch("hexpath.scanner.shutil.which", return_value=None)
+    def test_finds_standard_windows_nmap_install(
+        self,
+        _which_mock,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            program_files = Path(directory) / "Program Files"
+            program_files_x86 = Path(directory) / "Program Files (x86)"
+            installed_nmap = program_files_x86 / "Nmap" / "nmap.exe"
+            installed_nmap.parent.mkdir(parents=True)
+            installed_nmap.touch()
+
+            resolved = resolve_nmap_executable(
+                platform_name="nt",
+                environ={
+                    "ProgramFiles": str(program_files),
+                    "ProgramFiles(x86)": str(program_files_x86),
+                },
+            )
+
+        self.assertEqual(resolved, str(installed_nmap))
+
+    @patch("hexpath.scanner.Path.is_file", return_value=False)
+    @patch("hexpath.scanner.shutil.which", return_value=None)
+    def test_returns_none_when_windows_nmap_is_not_installed(
+        self,
+        _which_mock,
+        _is_file_mock,
+    ) -> None:
+        self.assertIsNone(
+            resolve_nmap_executable(
+                platform_name="nt",
+                environ={"ProgramFiles": "C:/Program Files"},
+            )
+        )
 
 
 class NmapXmlParserTests(unittest.TestCase):

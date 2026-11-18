@@ -18,6 +18,9 @@ against anything other than the VM the team is authorized to test.
   python3 -m venv .venv
   .venv/bin/python -m pip install --editable .
   ```
+- On Windows, either use the commands in `WINDOWS.md` to build from source or
+  download the release ZIP and run `hexpath.exe`. Python is not required for
+  the release executable. Nmap is still required for live scans.
 - The VM's IPv4 or IPv6 address, confirmed with the person who owns the lab.
 - Optional: an NVD API key exported as `NVD_API_KEY` for faster CVE lookups.
   Without one, HexPath spaces NVD requests ~6 seconds apart.

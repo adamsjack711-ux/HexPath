@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from ipaddress import IPv4Address, IPv6Address, ip_address
 import json
+import os
+from pathlib import Path
 import shutil
 import subprocess
 from typing import Any
@@ -265,14 +267,19 @@ def _validate_ports(value: str) -> str:
 def run_nmap(command: NmapCommand, *, timeout_seconds: int = 300) -> str:
     """Execute a prevalidated Nmap command and return its XML output."""
     executable = command.arguments[0]
-    if shutil.which(executable) is None:
-        raise NmapNotFoundError(f"Nmap executable not found: {executable}")
+    resolved_executable = resolve_nmap_executable(executable)
+    if resolved_executable is None:
+        message = f"Nmap executable not found: {executable}"
+        if os.name == "nt":
+            message += ". Install Nmap from https://nmap.org/download.html#windows"
+        raise NmapNotFoundError(message)
     if timeout_seconds <= 0:
         raise NmapExecutionError("timeout_seconds must be greater than zero")
 
+    arguments = (resolved_executable, *command.arguments[1:])
     try:
         process = subprocess.run(
-            command.arguments,
+            arguments,
             capture_output=True,
             check=False,
             text=True,
@@ -292,6 +299,44 @@ def run_nmap(command: NmapCommand, *, timeout_seconds: int = 300) -> str:
         )
 
     return process.stdout
+
+
+def resolve_nmap_executable(
+    executable: str = "nmap",
+    *,
+    platform_name: str | None = None,
+    environ: dict[str, str] | None = None,
+) -> str | None:
+    """Locate Nmap, including the standard Windows installer directories."""
+    resolved = shutil.which(executable)
+    if resolved is not None:
+        return resolved
+
+    requested_path = Path(executable)
+    if requested_path.is_file():
+        return str(requested_path)
+
+    selected_platform = os.name if platform_name is None else platform_name
+    if selected_platform != "nt" or requested_path.name.lower() not in {"nmap", "nmap.exe"}:
+        return None
+
+    selected_environment = os.environ if environ is None else environ
+    install_roots = (
+        selected_environment.get("ProgramFiles"),
+        selected_environment.get("ProgramFiles(x86)"),
+        selected_environment.get("LOCALAPPDATA"),
+    )
+    candidates: list[Path] = []
+    for root in install_roots:
+        if not root:
+            continue
+        candidates.append(Path(root) / "Nmap" / "nmap.exe")
+        if root == selected_environment.get("LOCALAPPDATA"):
+            candidates.append(Path(root) / "Programs" / "Nmap" / "nmap.exe")
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return None
 
 
 def parse_nmap_xml(

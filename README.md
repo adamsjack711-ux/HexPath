@@ -208,6 +208,14 @@ python3 -m venv .venv
 .venv/bin/python -m pip install --editable .
 ```
 
+## Windows executable
+
+Windows users can download `HexPath-Windows-x64.zip` from the repository's
+GitHub Releases page. It contains a standalone `hexpath.exe`, so Python is not
+required. Nmap remains a separate prerequisite for live scans; offline analysis
+and `--plan` work without it. See [WINDOWS.md](WINDOWS.md) for checksum,
+installation, usage, and reproducible build instructions.
+
 ## Compact command syntax
 
 The executable remains `hexpath`. Long commands stay available for scripts and

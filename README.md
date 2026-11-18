@@ -142,7 +142,7 @@ and record its origin using `scan run --vantage host:<IPv6>`. Transfer the resul
 back and combine observations using the existing CVE command:
 
 ```sh
-hexpath cve scan --input scan.json --input scan-from-host-10.json > cves.json
+hexpath cve scan --input scan.json --input scan-from-host-10.json --output cves.json
 hexpath assess --scope examples/lab-scope.example.json \
   --scan scan.json --scan scan-from-host-10.json --cves cves.json \
   --target 2001:db8:1::20 --output assessment.json
@@ -159,7 +159,7 @@ its saved JSONL result into a **copy** of the saved HexPath scan:
 ```sh
 hexpath scan confirm-mongodb --scope scope.json --input scan.json \
   --zgrab2 mongodb.jsonl --output confirmed-scan.json
-hexpath cve scan --input confirmed-scan.json > confirmed-cves.json
+hexpath cve scan --input confirmed-scan.json --output confirmed-cves.json
 hexpath assess --scope scope.json --scan confirmed-scan.json \
   --cves confirmed-cves.json --target 2001:db8:1::20
 ```

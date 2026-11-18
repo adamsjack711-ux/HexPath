@@ -39,6 +39,20 @@ Use HexPath only against systems you are authorized to test.
 scan. Live scans require Nmap; offline graph and saved-assessment commands do
 not.
 
+## Save JSON between commands
+
+Use HexPath's native output option when saving CVE results for another command:
+
+```powershell
+.\HexPath\hexpath.exe cve scan --input scan.json --output cves.json
+.\HexPath\hexpath.exe graph build --scan scan.json --cves cves.json --output graph.json
+```
+
+The `--output` (or `-o`) option writes UTF-8 JSON. Windows PowerShell 5.1 writes
+shell redirection such as `> cves.json` as UTF-16, which is not suitable for a
+UTF-8 JSON pipeline. Use the native option instead of redirection for JSON that
+HexPath will read later.
+
 ## Build from source
 
 The release workflow builds on a native `windows-latest` GitHub runner because

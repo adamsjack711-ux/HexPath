@@ -20,6 +20,27 @@ class GraphImportValidationTests(unittest.TestCase):
             "edges": [],
         }
 
+    def edge(self, **overrides):
+        edge = {
+            "id": "edge:1",
+            "source": "entry:scanner",
+            "target": "host:2001:db8::10",
+            "relationship": "transition",
+            "weight": 1,
+            "description": "Imported edge",
+            "evidence": [
+                {
+                    "source": "unit-test",
+                    "summary": "Test observation",
+                    "level": "observed",
+                    "collected_at": "2026-10-22T12:00:00+00:00",
+                    "reference": "test-fixture",
+                }
+            ],
+        }
+        edge.update(overrides)
+        return edge
+
     def test_rejects_malformed_json(self):
         for payload in ('{', '{"nodes":', 'not json'):
             with self.subTest(payload=payload):
@@ -44,31 +65,34 @@ class GraphImportValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(GraphError, "duplicate node identifiers"):
             AttackGraph.from_dict(payload)
 
+    def test_rejects_duplicate_edge_ids(self):
+        edge = self.edge()
+        payload = {**self.valid, "edges": [edge, edge]}
+        with self.assertRaisesRegex(GraphError, "duplicate edge identifiers"):
+            AttackGraph.from_dict(payload)
+
+    def test_rejects_invalid_edge_weights(self):
+        for weight in (0, -1, float("inf")):
+            with self.subTest(weight=weight):
+                payload = {**self.valid, "edges": [self.edge(weight=weight)]}
+                with self.assertRaisesRegex(GraphError, "edge weight must be finite"):
+                    AttackGraph.from_dict(payload)
+
     def test_rejects_edges_referencing_unknown_nodes(self):
-        edge = {
-            "id": "edge:1", "source": "unknown", "target": "host:2001:db8::10",
-            "relationship": "transition", "weight": 1,
-            "description": "Imported edge", "evidence": [
-                {"source": "unit-test", "summary": "Test observation",
-                 "level": "observed", "collected_at": "2026-10-22T12:00:00+00:00",
-                 "reference": "test-fixture"}
-            ],
-        }
-        payload = {**self.valid, "edges": [edge]}
+        payload = {**self.valid, "edges": [self.edge(source="unknown")]}
         with self.assertRaisesRegex(GraphError, "unknown source"):
             AttackGraph.from_dict(payload)
 
     def test_rejects_missing_edge_evidence(self):
-        payload = {**self.valid, "edges": [{
-            "id": "edge:1", "source": "entry:scanner", "target": "host:2001:db8::10",
-            "relationship": "transition", "weight": 1,
-            "description": "Unsubstantiated edge", "evidence": [],
-        }]}
+        payload = {**self.valid, "edges": [self.edge(evidence=[])]}
         with self.assertRaisesRegex(GraphError, "supporting evidence"):
             AttackGraph.from_dict(payload)
 
     def test_rejects_invalid_node_metadata(self):
-        payload = {"nodes": [{**self.valid["nodes"][0], "metadata": "not an object"}], "edges": []}
+        payload = {
+            "nodes": [{**self.valid["nodes"][0], "metadata": "not an object"}],
+            "edges": [],
+        }
         with self.assertRaisesRegex(GraphError, "node metadata must be an object"):
             AttackGraph.from_dict(payload)
 

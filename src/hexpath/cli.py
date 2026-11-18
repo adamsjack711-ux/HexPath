@@ -406,6 +406,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=30,
         help="maximum time for each NVD request in seconds",
     )
+    scan_cve_parser.add_argument(
+        "-o",
+        "--output",
+        help="write UTF-8 CVE JSON to this path instead of standard output",
+    )
 
     graph_parser = subcommands.add_parser(
         "graph",
@@ -894,7 +899,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     api_key=os.environ.get("NVD_API_KEY"),
                 ),
             )
-            print(result.to_json())
+            serialized = result.to_json()
+            if args.output:
+                Path(args.output).write_text(serialized + "\n", encoding="utf-8")
+            else:
+                print(serialized)
             return 0 if result.completed else 2
         if args.command == "graph" and args.graph_command == "build":
             scan_documents = _read_json_documents(args.scan, "scan")

@@ -695,6 +695,46 @@ class CveCliTests(unittest.TestCase):
         self.assertEqual(len(check_mock.call_args.args[0]), 1)
 
     @patch("hexpath.cli.check_scan_documents")
+    def test_scan_check_output_writes_utf8_json(self, check_mock) -> None:
+        check_mock.return_value = ScanVulnerabilityResult(
+            checks=(CpeVulnerabilityResult(cpe=CpeIdentity("cpe:/a:x:y:1"), completed=True),),
+            vulnerabilities=(),
+            matches=(),
+            service_count=1,
+        )
+        temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+        directory = Path(temporary_directory.name)
+        input_path = directory / "scan.json"
+        output_path = directory / "cves.json"
+        input_path.write_text(
+            '{"hosts": [], "services": []}', encoding="utf-8"
+        )
+        stdout = StringIO()
+
+        with redirect_stdout(stdout):
+            exit_code = main(
+                ["cve", "scan", "--input", str(input_path), "--output", str(output_path)]
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stdout.getvalue(), "")
+        raw = output_path.read_bytes()
+        self.assertFalse(raw.startswith((b"\xff\xfe", b"\xfe\xff")))
+        self.assertEqual(json.loads(raw.decode("utf-8"))["status"], "clean")
+
+        graph_path = directory / "graph.json"
+        with redirect_stdout(StringIO()):
+            graph_exit_code = main(
+                [
+                    "graph", "build", "--scan", str(input_path),
+                    "--cves", str(output_path), "--output", str(graph_path),
+                ]
+            )
+        self.assertEqual(graph_exit_code, 0)
+        self.assertIn("nodes", json.loads(graph_path.read_text(encoding="utf-8")))
+
+    @patch("hexpath.cli.check_scan_documents")
     def test_scan_check_accepts_multiple_vantage_files(self, check_mock) -> None:
         check_mock.return_value = ScanVulnerabilityResult(
             checks=(CpeVulnerabilityResult(cpe=CpeIdentity("cpe:/a:x:y:1"), completed=True),),

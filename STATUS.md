@@ -3,7 +3,8 @@
 ## School VM path workflow (18 November 2026)
 
 Working checkout: `/Users/jackadams-lovell/hexpath-guided-target-path`, branch
-`feat/guided-target-path` at `eae6ca0`, with uncommitted path workflow changes.
+`feat/guided-target-path`. Path workflow changes were committed as `a0047d4`
+and pushed for review in PR #24.
 `hexpath path` now ranks observed hosts from one or more saved scans, shows
 their open services and CVE investigation leads, and includes directed host
 routes only when observed access evidence supports the graph transitions.
@@ -11,7 +12,7 @@ routes only when observed access evidence supports the graph transitions.
 accepts saved results for offline use. The default latest-scan flow remains.
 
 Offline verification: `PYTHONPATH=src python3 -m unittest discover -s tests`
-passed 224 tests before this documentation update. Tests cover two-host ranking,
+passed 224 tests. Tests cover two-host ranking,
 no invented access route from a CVE candidate, and an observed two-vantage
 route. No live network scan or VM user journey was run. Next: exercise the CLI
 with saved scans from the intended school VM and review host ranking with the

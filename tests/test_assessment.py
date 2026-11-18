@@ -294,5 +294,112 @@ class AssessmentCliTests(unittest.TestCase):
         self.assertIn("INCOMPLETE", output.getvalue())
 
 
+def _ipv4_documents():
+    """Reuse the IPv6 sample graph as an IPv4 one by swapping the address."""
+    scan, cves = sample_documents()
+    blob = json.dumps({"scan": scan, "cves": cves}).replace("2001:db8::10", "192.0.2.10")
+    data = json.loads(blob)
+    scan, cves = data["scan"], data["cves"]
+    cves.update({
+        "completed": True,
+        "coverage": {"services": 2},
+        "checks": [
+            {"cpe": CpeIdentity(service["cpes"][0]).value, "completed": True}
+            for service in scan["services"]
+        ],
+    })
+    return scan, cves
+
+
+class Ipv4AssessmentTests(unittest.TestCase):
+    def setUp(self):
+        self.scope = Scope.from_dict({"name": "IPv4 lab", "targets": ["192.0.2.0/24"]})
+        self.scan, self.cves = _ipv4_documents()
+
+    def summarize(self, target="host:192.0.2.10"):
+        return summarize_assessment(
+            self.scope, validate_scans(self.scope, [self.scan]), self.cves,
+            source=ENTRY_NODE_ID, target=target,
+        )
+
+    def test_ipv4_objective_is_assessed_and_labeled(self):
+        result = self.summarize()
+        self.assertEqual(result["address_family"], "IPv4")
+        self.assertEqual(result["schema_version"], "hexpath-ipv4-assessment-v2")
+        self.assertTrue(result["target_service_reachable_from_source"])
+        self.assertTrue(result["coverage_complete"])
+        self.assertEqual(
+            [s["assessment"] for s in result["candidate_path"]["steps"]],
+            ["observed_reachability", "candidate_compromise"],
+        )
+        rendered = render_assessment(result)
+        self.assertIn("HexPath IPv4 Pentest Assessment", rendered)
+        self.assertIn("Record the IPv4 addresses", rendered)
+        self.assertNotIn("Record the IPv6 addresses", rendered)
+        self.assertIn("access: UNVERIFIED", rendered)
+
+
+class Ipv4AssessmentCliTests(unittest.TestCase):
+    def setUp(self):
+        self.scan, self.cves = _ipv4_documents()
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.directory = Path(temporary.name)
+        for name, doc in (("scope", {"name": "lab", "targets": ["192.0.2.0/24"]}),
+                          ("scan", self.scan), ("cves", self.cves)):
+            (self.directory / f"{name}.json").write_text(json.dumps(doc))
+        self.args = ["assess", "--scope", str(self.directory / "scope.json"),
+                     "--target", "192.0.2.10"]
+
+    @patch("hexpath.cli.run_nmap")
+    @patch("hexpath.cli.check_scan_documents")
+    def test_ipv4_offline_summary_and_evidence_export(self, enrich, scan):
+        output = StringIO()
+        bundle = self.directory / "assessment.json"
+        with redirect_stdout(output):
+            code = main([*self.args, "--scan", str(self.directory / "scan.json"),
+                         "--cves", str(self.directory / "cves.json"),
+                         "--output", str(bundle)])
+        self.assertEqual(code, 0)
+        self.assertIn("HexPath IPv4 Pentest Assessment", output.getvalue())
+        saved = json.loads(bundle.read_text())
+        self.assertEqual(saved["target"], "host:192.0.2.10")
+        self.assertEqual(saved["schema_version"], "hexpath-ipv4-assessment-v2")
+        scan.assert_not_called()
+        enrich.assert_not_called()
+
+    @patch("hexpath.cli.check_scan_documents")
+    @patch("hexpath.cli.run_nmap")
+    def test_live_ipv4_assessment_does_not_use_dash_6(self, scan, enrich):
+        scan.return_value = ('<nmaprun><host><status state="up"/>'
+                             '<address addr="192.0.2.10" addrtype="ipv4"/></host></nmaprun>')
+        enrich.return_value.to_dict.return_value = {
+            "completed": False, "vulnerabilities": [], "matches": [],
+        }
+        output = StringIO()
+        with redirect_stdout(output):
+            code = main([*self.args, "192.0.2.10"])
+        self.assertEqual(code, 2)
+        self.assertNotIn("-6", scan.call_args.args[0].arguments)
+        self.assertIn("HexPath IPv4 Pentest Assessment", output.getvalue())
+
+    @patch("hexpath.cli.check_scan_documents")
+    @patch("hexpath.cli.run_nmap")
+    def test_dual_stack_scope_assesses_an_ipv4_objective(self, scan, enrich):
+        (self.directory / "scope.json").write_text(json.dumps({
+            "name": "mixed lab", "targets": ["2001:db8::/64", "192.0.2.0/24"],
+        }))
+        scan.return_value = ('<nmaprun><host><status state="up"/>'
+                             '<address addr="192.0.2.10" addrtype="ipv4"/></host></nmaprun>')
+        enrich.return_value.to_dict.return_value = {
+            "completed": False, "vulnerabilities": [], "matches": [],
+        }
+        with redirect_stdout(StringIO()):
+            code = main([*self.args, "192.0.2.10"])
+        self.assertEqual(code, 2)
+        scan.assert_called_once()
+        self.assertNotIn("-6", scan.call_args.args[0].arguments)
+
+
 if __name__ == "__main__":
     unittest.main()

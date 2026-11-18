@@ -49,10 +49,10 @@ def save_latest_scan(document: dict[str, Any]) -> Path:
             suffix=".tmp",
             delete=False,
         ) as temporary:
+            temporary_name = temporary.name
             temporary.write(serialized)
             temporary.flush()
             os.fsync(temporary.fileno())
-            temporary_name = temporary.name
         os.chmod(temporary_name, 0o600)
         os.replace(temporary_name, destination)
     finally:

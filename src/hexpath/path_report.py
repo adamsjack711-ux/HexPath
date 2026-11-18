@@ -148,10 +148,12 @@ def compile_path_report(
 def render_path_report(document: dict[str, Any]) -> str:
     """Render the highest-ranked candidate paths for terminal use."""
     paths = document["candidate_paths"]
+    coverage = "complete" if document["coverage_complete"] else "incomplete"
     lines = [
         "HexPath Candidate Paths",
         "=======================",
         f"Starting point: {document['source']}",
+        f"CVE lookup coverage: {coverage}",
     ]
     if not paths:
         lines.append("No CVE-backed candidate path was found in the latest scan.")
@@ -197,8 +199,6 @@ def render_path_report(document: dict[str, Any]) -> str:
         if isinstance(references, list) and references:
             candidate_lines.append(f"  Reference: {references[0]}")
         lines.extend(candidate_lines)
-    coverage = "complete" if document["coverage_complete"] else "incomplete"
-    lines.extend(["", f"CVE lookup coverage: {coverage}"])
     return _render_lines(lines)
 
 

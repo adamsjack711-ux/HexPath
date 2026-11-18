@@ -212,6 +212,31 @@ class PathCliTests(unittest.TestCase):
         self.assertEqual(exit_code, 2)
         self.assertIn("run a Hexpath scan", errors.getvalue())
 
+    def test_no_matches_reports_lookup_coverage(self) -> None:
+        for complete, label in ((False, "incomplete"), (True, "complete")):
+            with self.subTest(complete=complete):
+                cves = {
+                    **self.cves,
+                    "completed": complete,
+                    "coverage": {**self.cves["coverage"], "completed_cpe_checks": int(complete)},
+                    "matches": [],
+                    "vulnerabilities": [],
+                }
+                save_latest_scan({**self.scan, "cves": cves})
+                output = StringIO()
+                with redirect_stdout(output):
+                    exit_code = main(["path"])
+                self.assertEqual(exit_code, 1)
+                self.assertIn(f"CVE lookup coverage: {label}", output.getvalue().splitlines())
+
+    def test_failed_save_preserves_previous_scan_and_removes_temporary_file(self) -> None:
+        saved_path = save_latest_scan(self.scan)
+        with patch("hexpath.state.os.fsync", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                save_latest_scan({**self.scan, "services": []})
+        self.assertEqual(load_latest_scan(), self.scan)
+        self.assertEqual(list(saved_path.parent.iterdir()), [saved_path])
+
 
 class SetupCliTests(unittest.TestCase):
     @patch("hexpath.cli.verify_nmap", return_value="Nmap version 7.99")

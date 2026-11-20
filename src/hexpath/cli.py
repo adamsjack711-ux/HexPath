@@ -753,7 +753,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                             raise ValueError("cached jump scan must be a JSON object")
                         scans.append(internal_scan)
             if not args.cves and not args.search_cves and (not args.scan or len(scans) == 1):
-                cves = scans[0].get("cves")
+                cached_cves = scans[0].get("cves")
+                if isinstance(cached_cves, dict) and (
+                    cached_cves.get("completed") is True or cached_cves.get("matches") != []
+                ):
+                    cves = cached_cves
             if not isinstance(cves, dict):
                 cves = check_scan_documents(
                     scans,

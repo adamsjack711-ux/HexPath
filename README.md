@@ -44,7 +44,9 @@ Run `hexpath` or `hexpath --help` for these options. The existing `scan`,
 
 Every completed target-first scan and `hexpath scan run` stores its normalized
 result as Hexpath's latest scan. Run `hexpath path` afterward with no additional
-arguments. The command ranks all observed hosts for investigation using their
+arguments. It looks up CVEs automatically from software identities in the saved
+scan. Use `-sV` on the scan to collect service versions and software identifiers.
+The command ranks all observed hosts for investigation using their
 open services and CVE candidates. It orders candidates by CVSS severity and
 match confidence, and keeps hosts with no CVE candidate visible. A candidate is
 an investigation lead, not a confirmed vulnerability or a route into a host.
@@ -65,7 +67,8 @@ to five candidate CVE IDs with their matched ports and protocols, followed by
 review steps for the strongest lead. Hosts without leads show observed open
 ports. `hexpath path --json` prints the full report with every observed host
 and lead, and `-o report.json` saves it. The default no-argument form reuses
-embedded CVE results when available.
+completed CVE results and any existing candidates. It retries incomplete CVE
+lookups when the saved results contain zero candidates.
 
 Run `hexpath path --search-cves` to query NVD again using the saved scan, or
 add `--scan scan.json` to use a specific scan file. The search uses recorded

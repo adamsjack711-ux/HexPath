@@ -321,6 +321,21 @@ class PathCliTests(unittest.TestCase):
         check_mock.assert_called_once()
         self.assertEqual(load_latest_scan()["cves"], self.cves)
 
+    @patch("hexpath.cli.check_scan_documents")
+    def test_path_retries_incomplete_empty_cve_cache_by_default(self, check_mock) -> None:
+        incomplete = {**self.cves, "completed": False, "vulnerabilities": [], "matches": []}
+        save_latest_scan({**self.scan, "cves": incomplete})
+        check_mock.return_value.to_dict.return_value = self.cves
+        output = StringIO()
+
+        with redirect_stdout(output):
+            self.assertEqual(main(["path"]), 0)
+            self.assertEqual(main(["path"]), 0)
+
+        check_mock.assert_called_once()
+        self.assertIn("CVE-2024-6387  22/tcp", output.getvalue())
+        self.assertEqual(load_latest_scan()["cves"], self.cves)
+
     @patch("hexpath.cli.load_jump_profile")
     @patch("hexpath.cli.check_scan_documents")
     def test_path_search_cves_refreshes_saved_scan_without_changing_it(self, check_mock, profile_mock) -> None:
@@ -419,7 +434,8 @@ class PathCliTests(unittest.TestCase):
         self.assertIn("CVE JSON must be an object", errors.getvalue())
         check_mock.assert_not_called()
 
-    def test_no_matches_reports_lookup_coverage(self) -> None:
+    @patch("hexpath.cli.check_scan_documents")
+    def test_no_matches_reports_lookup_coverage(self, check_mock) -> None:
         for complete, label in ((False, "incomplete"), (True, "complete")):
             with self.subTest(complete=complete):
                 cves = {
@@ -430,11 +446,14 @@ class PathCliTests(unittest.TestCase):
                     "vulnerabilities": [],
                 }
                 save_latest_scan({**self.scan, "cves": cves})
+                check_mock.return_value.to_dict.return_value = cves
+                check_mock.reset_mock()
                 output = StringIO()
                 with redirect_stdout(output):
                     exit_code = main(["path"])
                 self.assertEqual(exit_code, 1)
                 self.assertIn(f"CVE lookup coverage: {label}", output.getvalue().splitlines())
+                self.assertEqual(check_mock.call_count, 0 if complete else 1)
 
     def test_failed_save_preserves_previous_scan_and_removes_temporary_file(self) -> None:
         saved_path = save_latest_scan(self.scan)

@@ -4,6 +4,14 @@ An IPv6-focused network penetration-testing school project for controlled lab VM
 
 HexPath helps a network pentester answer: **from my current position, what is exposed over IPv6, which hosts merit investigation, and which modeled routes toward my target have supporting evidence?** It connects scoped service discovery, CVE candidates, and observations from multiple scan origins into an evidence-backed CLI assessment. This school group project is intended for safe, isolated VM labs. Modeled routes guide investigation and do not establish successful exploitation.
 
+## HexPath vs. Nmap demo
+
+The demo compares IPv6 service discovery in a lab and shows how HexPath matches a saved OpenSSH service record to CVE candidates.
+
+![Side-by-side HexPath and Nmap terminal demo](examples/cli-comparison/hexpath-vs-nmap.gif)
+
+[Download the MP4](examples/cli-comparison/hexpath-vs-nmap.mp4?raw=true) · [Download the GIF](examples/cli-comparison/hexpath-vs-nmap.gif?raw=true)
+
 ## Quick start
 
 Run HexPath directly against a target you are authorized to test:

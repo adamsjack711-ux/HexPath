@@ -60,8 +60,18 @@ hexpath path --scan entry-scan.json --scan second-vantage-scan.json \
   --cves lab-cves.json --json
 ```
 
-`hexpath path --json` prints structured results, and `-o report.json` saves
-them. The default no-argument form reuses embedded CVE results when available.
+The terminal report shows up to five ranked hosts. For each host, it lists up
+to five candidate CVE IDs with their matched ports and protocols, followed by
+review steps for the strongest lead. Hosts without leads show observed open
+ports. `hexpath path --json` prints the full report with every observed host
+and lead, and `-o report.json` saves it. The default no-argument form reuses
+embedded CVE results when available.
+
+Run `hexpath path --search-cves` to query NVD again using the saved scan, or
+add `--scan scan.json` to use a specific scan file. The search uses recorded
+service CPEs with precise versions and leaves the saved scan and results intact.
+The terminal shows how many software identities were checked and how many
+services lacked a CPE. `--cves` is the offline option.
 
 For a pre-authorized network behind an SSH jump server, place
 `jump-profile.json` beside the saved state file (the directory selected by

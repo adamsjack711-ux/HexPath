@@ -8,6 +8,11 @@ from hexpath.graph import GraphError, build_attack_graph, vulnerability_cost
 from hexpath.models import Confidence
 
 
+TERMINAL_HOST_LIMIT = 5
+TERMINAL_SERVICE_LIMIT = 5
+TERMINAL_CVE_LIMIT = 5
+
+
 def compile_path_report(
     scan: dict[str, Any] | list[dict[str, Any]],
     cves: dict[str, Any],
@@ -212,82 +217,97 @@ def compile_path_report(
 
 
 def render_path_report(document: dict[str, Any]) -> str:
-    """Render the highest-ranked candidate paths for terminal use."""
+    """Render a short investigation summary for the highest-ranked hosts."""
     paths = document["candidate_paths"]
     coverage = "complete" if document["coverage_complete"] else "incomplete"
+    hosts = document["ranked_hosts"]
+    shown_hosts = hosts[:TERMINAL_HOST_LIMIT]
+    ports_by_host_and_cve: dict[str, dict[str, dict[str, None]]] = {
+        host["host"]: {} for host in shown_hosts
+    }
+    for path in paths:
+        endpoint = path["endpoint"]
+        host_cves = ports_by_host_and_cve.get(endpoint["host"])
+        if host_cves is not None:
+            ports = host_cves.setdefault(path["finding"]["cve_id"], {})
+            ports[f"{endpoint['port']}/{endpoint['protocol']}"] = None
     lines = [
         "HexPath Host Investigation Paths",
         "================================",
         f"Starting point: {document['source']}",
         f"CVE lookup coverage: {coverage}",
     ]
-    hosts = document["ranked_hosts"]
-    lines.extend(["", f"Hosts observed: {len(hosts)}", "Host investigation priority (CVE candidates are unconfirmed)"])
-    for host in hosts:
+    lookup = document["coverage"]
+    if isinstance(lookup, dict):
+        attempted = lookup.get("cpe_checks")
+        completed = lookup.get("completed_cpe_checks")
+        if isinstance(attempted, int) and isinstance(completed, int):
+            lines.append(f"Software identities checked: {completed}/{attempted}")
+        missing = lookup.get("services_without_cpe")
+        if isinstance(missing, int) and missing > 0:
+            lines.append(f"Services missing a CPE (software identifier): {missing}")
+        if attempted == 0 and (missing or lookup.get("invalid_cpes")):
+            lines.append("CVE search needs a saved service scan with precise software identities.")
+    lines.append(f"Hosts observed: {len(hosts)} | showing {len(shown_hosts)} | CVE leads: {len(paths)}")
+    for host in shown_hosts:
         best = host["best_candidate"]
-        lead = (
-            f"{best['finding']['cve_id']} on {best['endpoint']['port']}/{best['endpoint']['protocol']}"
-            if best else "no CVE candidate"
-        )
-        lines.append(
-            f"  {host['rank']}. {host['host']} | open services {len(host['open_services'])}"
-            f" | candidates {host['candidate_count']} | {lead}"
-        )
-        for service in host["open_services"][:5]:
-            lines.append(
-                f"     {service['port']}/{service['protocol']}: {_service_identity(service)}"
-            )
-        if len(host["open_services"]) > 5:
-            lines.append(f"     ... {len(host['open_services']) - 5} more open services in JSON")
-        route = host["supported_route"]
-        if route:
-            lines.append(f"     Evidence-backed route: {' -> '.join(route['nodes'])}")
-    if not any(host["supported_route"] for host in hosts):
-        lines.append("No evidence-backed host access route is recorded in these scans.")
-    if not paths:
-        lines.append("No CVE-backed investigation lead was found in the supplied scans.")
-        unmatched = document["observed_services_without_cve_candidates"]
-        if unmatched:
-            lines.extend(["", "Observed open services without CVE candidates"])
-            for service in unmatched:
-                lines.append(
-                    f"  {service['host']}:{service['port']}/{service['protocol']}  "
-                    f"{_service_identity(service)}"
-                )
+        services = host["open_services"]
         lines.extend([
             "",
-            "Run a service-version scan before path analysis when software identities are missing.",
+            f"{host['rank']}. {host['host']} | Open services: {len(services)}"
+            f" | CVE leads: {host['candidate_count']}",
         ])
-        return _render_lines(lines)
-
-    lines.append(f"Investigation leads: {len(paths)}")
-    for path in paths:
-        endpoint = path["endpoint"]
-        finding = path["finding"]
+        host_cves = ports_by_host_and_cve[host["host"]]
+        if host_cves:
+            lines.append("   CVE candidates and matched ports")
+            for cve_id, ports in list(host_cves.items())[:TERMINAL_CVE_LIMIT]:
+                lines.append(f"      {cve_id}  {', '.join(ports)}")
+            if len(host_cves) > TERMINAL_CVE_LIMIT:
+                lines.append(f"      {len(host_cves) - TERMINAL_CVE_LIMIT} more CVEs in the full report")
+        elif services:
+            lines.append("   Observed open ports")
+            for service in services[:TERMINAL_SERVICE_LIMIT]:
+                version_note = "" if service.get("version") else " (version unknown)"
+                lines.append(
+                    f"      {service['port']}/{service['protocol']}  "
+                    f"{_service_identity(service)}{version_note}"
+                )
+            if len(services) > TERMINAL_SERVICE_LIMIT:
+                lines.append(f"      {len(services) - TERMINAL_SERVICE_LIMIT} more in the full report")
+        route = host["supported_route"]
+        if route:
+            lines.append(f"   Evidence-backed route: {' -> '.join(route['nodes'])}")
+        if not best:
+            lines.append("   No CVE candidate in the supplied results.")
+            if services:
+                lines.append("   1. Confirm product and version from the host inventory.")
+            else:
+                lines.append("   1. Review which ports and protocols the scan covered.")
+            continue
+        endpoint = best["endpoint"]
+        address = endpoint["host"]
+        endpoint_host = f"[{address}]" if ":" in address else address
+        finding = best["finding"]
         score = finding.get("cvss_score")
         score_label = f"CVSS {score:.1f}" if isinstance(score, (int, float)) else "CVSS unknown"
-        candidate_lines = [
-            "",
+        lines.extend([
             (
-                f"Lead {path['rank']}: {path['source']} -> "
-                f"{endpoint['host']}:{endpoint['port']}/{endpoint['protocol']}"
+                f"   1. Review {endpoint_host}:{endpoint['port']}/{endpoint['protocol']}"
+                f" ({_service_identity(best['service'])}), observed from {best['source']}."
             ),
-            f"  1. Port {endpoint['port']}/{endpoint['protocol']} is {endpoint['state']}",
-            f"     Service: {_service_identity(path['service'])}",
-            f"  2. {finding['cve_id']} | {score_label} | confidence {finding['confidence']}",
-            f"     {finding.get('reason') or 'No match reason supplied.'}",
-            f"  3. Validate the affected version, configuration, and patch state.",
-            f"  4. Run an approved test for {finding['cve_id']} and record the access result.",
-            f"  Priority cost: {path['priority_cost']:.2f}",
-        ]
-        if finding.get("cvss_vector"):
-            candidate_lines.append(f"  Vector: {finding['cvss_vector']}")
-        if finding.get("description"):
-            candidate_lines.append(f"  Summary: {finding['description']}")
-        references = finding.get("references")
-        if isinstance(references, list) and references:
-            candidate_lines.append(f"  Reference: {references[0]}")
-        lines.extend(candidate_lines)
+            (
+                f"   2. Review the unconfirmed {finding['cve_id']} lead "
+                f"({score_label}, {finding['confidence']} confidence)."
+            ),
+            f"      {finding.get('reason') or 'No match reason supplied.'}",
+            "   3. Verify the installed version, configuration, and patch status against the advisory.",
+        ])
+    if hosts and not any(host["supported_route"] for host in hosts):
+        lines.extend(["", "No evidence-backed host access route is recorded in these scans."])
+    if not hosts:
+        lines.extend(["", "No hosts were recorded in the supplied scans."])
+    if hosts:
+        lines.extend(["", "Use --json or --output for the full report."])
     return _render_lines(lines)
 
 

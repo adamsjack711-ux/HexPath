@@ -162,7 +162,70 @@ class PathCliTests(unittest.TestCase):
         self.assertIn("192.0.2.10:22/tcp", rendered)
         self.assertIn("OpenSSH ssh 9.6", rendered)
         self.assertIn("CVE-2024-6387", rendered)
-        self.assertIn("approved test", rendered)
+        self.assertIn("Verify the installed version, configuration, and patch status", rendered)
+
+    def test_path_terminal_groups_matched_ports_under_their_cve(self) -> None:
+        service_template = self.scan["services"][0]
+        for port in (80, 443, 2222):
+            self.scan["services"].append({
+                **service_template,
+                "id": f"service:192.0.2.10:tcp:{port}",
+                "port": port,
+            })
+        extra_cve = "CVE-2024-99999"
+        self.cves["vulnerabilities"].append({
+            **self.cves["vulnerabilities"][0], "id": extra_cve, "cvss_score": 2.0,
+        })
+        match = self.cves["matches"][0]
+        self.cves["matches"].extend([
+            {**match, "service_id": "service:192.0.2.10:tcp:2222"},
+            {**match, "service_id": "service:192.0.2.10:tcp:443", "cve_id": extra_cve},
+        ])
+        save_latest_scan({**self.scan, "cves": self.cves})
+
+        output = StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(main(["path"]), 0)
+
+        rendered = output.getvalue()
+        self.assertIn("CVE candidates and matched ports", rendered)
+        self.assertIn("CVE-2024-6387  22/tcp, 2222/tcp", rendered)
+        self.assertIn(f"{extra_cve}  443/tcp", rendered)
+        self.assertNotIn("80/tcp", rendered)
+
+    def test_path_terminal_shows_five_hosts_and_one_lead_each(self) -> None:
+        service_template = self.scan["services"][0]
+        match_template = self.cves["matches"][0]
+        for suffix in range(20, 61, 10):
+            address = f"192.0.2.{suffix}"
+            service_id = f"service:{address}:tcp:22"
+            self.scan["hosts"].append({"id": f"host:{address}", "address": address})
+            self.scan["services"].append({**service_template, "id": service_id, "host": address})
+            self.cves["matches"].append({**match_template, "service_id": service_id})
+        extra_cve = "CVE-2024-99999"
+        self.cves["vulnerabilities"].append({
+            **self.cves["vulnerabilities"][0], "id": extra_cve, "cvss_score": 2.0,
+        })
+        self.cves["matches"].append({**match_template, "cve_id": extra_cve})
+        save_latest_scan({**self.scan, "cves": self.cves})
+
+        terminal = StringIO()
+        with redirect_stdout(terminal):
+            self.assertEqual(main(["path"]), 0)
+        rendered = terminal.getvalue()
+        self.assertIn("Hosts observed: 6 | showing 5 | CVE leads: 7", rendered)
+        self.assertEqual(rendered.count("Review the unconfirmed CVE-2024-6387 lead"), 5)
+        self.assertNotIn("192.0.2.60", rendered)
+        self.assertIn(f"{extra_cve}  22/tcp", rendered)
+        self.assertNotIn(f"Review the unconfirmed {extra_cve} lead", rendered)
+        self.assertIn("Use --json or --output for the full report.", rendered)
+
+        output = StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(main(["path", "--json"]), 0)
+        report = json.loads(output.getvalue())
+        self.assertEqual(len(report["ranked_hosts"]), 6)
+        self.assertEqual(len(report["candidate_paths"]), 7)
 
     def test_path_ranks_multiple_saved_hosts_without_inventing_access(self) -> None:
         second = {
@@ -258,6 +321,36 @@ class PathCliTests(unittest.TestCase):
         check_mock.assert_called_once()
         self.assertEqual(load_latest_scan()["cves"], self.cves)
 
+    @patch("hexpath.cli.load_jump_profile")
+    @patch("hexpath.cli.check_scan_documents")
+    def test_path_search_cves_refreshes_saved_scan_without_changing_it(self, check_mock, profile_mock) -> None:
+        cached = {**self.scan, "cves": {**self.cves, "vulnerabilities": [], "matches": []}}
+        save_latest_scan(cached)
+        check_mock.return_value.to_dict.return_value = self.cves
+        output = StringIO()
+
+        with redirect_stdout(output):
+            self.assertEqual(main(["path", "--search-cves"]), 0)
+
+        check_mock.assert_called_once()
+        self.assertEqual(check_mock.call_args.args[0], [cached])
+        profile_mock.assert_not_called()
+        self.assertIn("Software identities checked: 1/1", output.getvalue())
+        self.assertIn("CVE-2024-6387  22/tcp", output.getvalue())
+        self.assertEqual(load_latest_scan(), cached)
+
+    def test_path_search_cves_reports_when_saved_services_lack_identities(self) -> None:
+        self.scan["services"][0]["cpes"] = []
+        save_latest_scan(self.scan)
+        output = StringIO()
+
+        with redirect_stdout(output):
+            self.assertEqual(main(["path", "--search-cves"]), 1)
+
+        self.assertIn("Software identities checked: 0/0", output.getvalue())
+        self.assertIn("Services missing a CPE (software identifier): 1", output.getvalue())
+        self.assertIn("CVE search needs a saved service scan", output.getvalue())
+
     @patch("hexpath.cli.scan_through_jump")
     @patch("hexpath.cli.load_jump_profile")
     @patch("hexpath.cli.check_scan_documents")
@@ -309,6 +402,22 @@ class PathCliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 2)
         self.assertIn("run a Hexpath scan", errors.getvalue())
+
+    @patch("hexpath.cli.check_scan_documents")
+    def test_path_rejects_non_object_cve_input_without_a_lookup(self, check_mock) -> None:
+        directory = Path(self.temporary_directory.name)
+        scan_file = directory / "scan.json"
+        cve_file = directory / "cves.json"
+        scan_file.write_text(json.dumps(self.scan), encoding="utf-8")
+        cve_file.write_text("[]", encoding="utf-8")
+        errors = StringIO()
+
+        with redirect_stdout(StringIO()), redirect_stderr(errors):
+            exit_code = main(["path", "--scan", str(scan_file), "--cves", str(cve_file)])
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("CVE JSON must be an object", errors.getvalue())
+        check_mock.assert_not_called()
 
     def test_no_matches_reports_lookup_coverage(self) -> None:
         for complete, label in ((False, "incomplete"), (True, "complete")):

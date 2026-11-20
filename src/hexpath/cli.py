@@ -123,8 +123,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--scan", action="append", default=[],
         help="saved scan JSON; repeat to combine observations from multiple hosts",
     )
-    path_parser.add_argument(
+    path_cve_input = path_parser.add_mutually_exclusive_group()
+    path_cve_input.add_argument(
         "--cves", help="saved CVE results for offline path analysis",
+    )
+    path_cve_input.add_argument(
+        "--search-cves", action="store_true",
+        help="query NVD for software identities in the saved scans, using fresh results",
     )
     path_parser.add_argument(
         "--cve-timeout",
@@ -722,8 +727,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             scans = _read_json_documents(args.scan, "scan") if args.scan else [load_latest_scan()]
             if any(not isinstance(scan, dict) for scan in scans):
                 raise ValueError("each scan JSON must be an object")
+            cves = None
+            if args.cves:
+                cves = _read_json_document(args.cves, "CVE")
+                if not isinstance(cves, dict):
+                    raise ValueError("CVE JSON must be an object")
             if not args.scan:
-                jump_profile = load_jump_profile(scans[0])
+                jump_profile = None if args.search_cves else load_jump_profile(scans[0])
                 jump_scan = scans[0].get("jump_scan")
                 if jump_profile is not None and not (
                     isinstance(jump_scan, dict) and jump_scan.get("completed") is True
@@ -742,9 +752,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         if not isinstance(internal_scan, dict):
                             raise ValueError("cached jump scan must be a JSON object")
                         scans.append(internal_scan)
-            cves = _read_json_document(args.cves, "CVE") if args.cves else (
-                scans[0].get("cves") if not args.scan or len(scans) == 1 else None
-            )
+            if not args.cves and not args.search_cves and (not args.scan or len(scans) == 1):
+                cves = scans[0].get("cves")
             if not isinstance(cves, dict):
                 cves = check_scan_documents(
                     scans,
@@ -753,7 +762,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         api_key=os.environ.get("NVD_API_KEY"),
                     ),
                 ).to_dict()
-                if not args.scan:
+                if not args.scan and not args.search_cves:
                     scans[0]["cves"] = cves
                     save_latest_scan(scans[0])
             report = compile_path_report(scans, cves)

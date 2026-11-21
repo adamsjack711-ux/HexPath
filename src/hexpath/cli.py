@@ -246,7 +246,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser = scan_commands.add_parser(
         "run",
         aliases=["r"],
-        help="run an authorized Nmap scan and print normalized JSON",
+        help="run an authorized scan and include CVE candidates in the JSON",
     )
     run_parser.set_defaults(scan_command="run")
     run_parser.add_argument(
@@ -289,6 +289,10 @@ def build_parser() -> argparse.ArgumentParser:
         dest="os_detection",
         action="store_true",
         help="add Nmap OS detection (-O); needs elevated privileges to run",
+    )
+    run_parser.add_argument(
+        "--no-cves", action="store_true",
+        help="skip NVD lookups for profiles that detect service versions",
     )
     run_family = run_parser.add_mutually_exclusive_group()
     run_family.add_argument(
@@ -821,7 +825,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             command = build_nmap_command(
                 scope,
                 args.targets,
-                args.profile or ScanProfile.DISCOVERY.value,
+                args.profile or ScanProfile.SERVICES,
                 skip_discovery=args.skip_discovery,
                 ports=args.ports,
                 ip_version=args.ip_version,
@@ -835,7 +839,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             command = build_nmap_command(
                 scope,
                 args.targets,
-                args.profile or ScanProfile.DISCOVERY.value,
+                args.profile or ScanProfile.SERVICES,
                 skip_discovery=args.skip_discovery,
                 ports=args.ports,
                 ip_version=args.ip_version,
@@ -848,9 +852,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 vantage=vantage,
             )
             document = result.to_dict()
+            if not args.no_cves and "-sV" in command.arguments:
+                document["cves"] = check_scan_documents(
+                    [document], client=NvdClient(api_key=os.environ.get("NVD_API_KEY")),
+                ).to_dict()
             save_latest_scan(document)
             print(json.dumps(document, indent=2, sort_keys=True))
-            return 0
+            return 2 if "cves" in document and not document["cves"]["completed"] else 0
         if args.command == "scan" and args.scan_command == "confirm-mongodb":
             scope = Scope.from_json_file(args.scope)
             scan = _read_json_document(args.input, "scan")

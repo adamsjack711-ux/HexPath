@@ -1,4 +1,4 @@
-"""Target-first CLI, with optional information gathering and readable results."""
+"""Target-first CLI for service discovery and CVE candidate reporting."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from hexpath.vulnerabilities import NvdClient, VulnerabilityError, check_scan_do
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="hexpath", description="Scan a target; add flags for more information.",
+        prog="hexpath", description="Scan a target, detect service versions, and look up CVE candidates.",
         epilog=(
             "After a scan, run 'hexpath path' to compile ports and CVEs. "
             "Advanced commands remain available: hexpath scan, scope, cve, graph, assess."
@@ -29,7 +29,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("targets", nargs="+", metavar="TARGET", help="IP, hostname, or scoped CIDR")
     parser.add_argument("-sV", "--services", action="store_true", help="detect service versions")
     parser.add_argument("-O", "--os-detection", action="store_true", help="detect OS (requires Nmap privileges)")
-    parser.add_argument("--cves", action="store_true", help="look up CVE candidates; enables service detection")
+    parser.add_argument(
+        "--cves", action=argparse.BooleanOptionalAction, default=True,
+        help="look up CVE candidates (default). Use --no-cves to skip lookup, with -sV for version probes",
+    )
     parser.add_argument("-p", "--ports", help="ports or ranges, e.g. 22,80,443 or 1-1000; '-' means all TCP ports")
     parser.add_argument("-Pn", dest="skip_discovery", action="store_true", help="skip host discovery")
     family = parser.add_mutually_exclusive_group()
@@ -89,7 +92,7 @@ def render_result(document: dict) -> str:
         lines.append("No hosts reported up. If the target is online, try -Pn.")
     cves = document.get("cves")
     if cves is None:
-        lines.append("CVE lookup not requested. Add --cves to check detected software.")
+        lines.append("CVE lookup skipped (--no-cves).")
     else:
         coverage = cves["coverage"]
         lines.append(f"CVE lookup: {coverage['completed_cpe_checks']}/{coverage['cpe_checks']} software checks completed.")
@@ -134,7 +137,7 @@ def main(argv: list[str]) -> int:
         if args.cves:
             print("Looking up CVE candidates…", file=sys.stderr, flush=True)
             document["cves"] = check_scan_documents(
-                [result.to_dict()], client=NvdClient(api_key=os.environ.get("NVD_API_KEY")),
+                [document], client=NvdClient(api_key=os.environ.get("NVD_API_KEY")),
             ).to_dict()
         save_latest_scan(document)
         serialized = json.dumps(document, indent=2, sort_keys=True)

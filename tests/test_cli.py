@@ -413,6 +413,7 @@ class ScanCliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertIn("nmap -6", output.getvalue())
+        self.assertIn("-sV", output.getvalue())
         self.assertIn("2001:db8:1::10/128", output.getvalue())
 
     def test_levels_describe_information_and_relative_wait(self) -> None:
@@ -538,10 +539,11 @@ class ScanCliTests(unittest.TestCase):
         self.assertIn("requested IPv6", errors.getvalue())
         run_mock.assert_not_called()
 
-    @patch("hexpath.cli.parse_nmap_xml")
+    @patch("hexpath.cli.check_scan_documents")
     @patch("hexpath.cli.run_nmap", return_value="<nmaprun/>")
-    def test_run_prints_normalized_json(self, _run_mock, parse_mock) -> None:
-        parse_mock.return_value = NmapScanResult(hosts=(), services=())
+    def test_run_includes_default_cve_coverage_in_json_and_state(self, run_mock, check_mock) -> None:
+        result = ScanVulnerabilityResult((), (), (), 0)
+        check_mock.return_value = result
         output = StringIO()
 
         with redirect_stdout(output):
@@ -557,11 +559,29 @@ class ScanCliTests(unittest.TestCase):
                 ]
             )
 
-        self.assertEqual(exit_code, 0)
+        self.assertEqual(exit_code, 2)
+        self.assertIn("-sV", run_mock.call_args.args[0].arguments)
+        check_mock.assert_called_once()
+        document = json.loads(output.getvalue())
         self.assertEqual(
-            json.loads(output.getvalue()),
-            {"vantage": "entry:scanner", "hosts": [], "services": []},
+            document,
+            {"vantage": "entry:scanner", "hosts": [], "services": [], "cves": result.to_dict()},
         )
+        self.assertEqual(load_latest_scan(), document)
+
+    @patch("hexpath.cli.check_scan_documents")
+    @patch("hexpath.cli.run_nmap", return_value="<nmaprun/>")
+    def test_run_skips_cves_for_discovery_quick_or_explicit_opt_out(self, run_mock, check_mock) -> None:
+        for flags, expected_probe in ((["--level", "0"], "-sn"), (["--level", "1"], "--top-ports"),
+                                      (["--no-cves"], "-sV")):
+            with self.subTest(flags=flags):
+                output = StringIO()
+                with redirect_stdout(output):
+                    exit_code = main(["scan", "run", "--scope", str(self.scope_path), *flags, "2001:db8:1::10"])
+                self.assertEqual(exit_code, 0)
+                self.assertIn(expected_probe, run_mock.call_args.args[0].arguments)
+                self.assertNotIn("cves", json.loads(output.getvalue()))
+        check_mock.assert_not_called()
 
     def test_plan_reports_out_of_scope_target(self) -> None:
         errors = StringIO()

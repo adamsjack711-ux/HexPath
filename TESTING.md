@@ -59,7 +59,7 @@ IPv6), so HexPath refuses every other address. Save this as
 
 | # | Check | Command | Pass criteria |
 |---|-------|---------|---------------|
-| 3 | Run a service scan | `hexpath scan run --scope lab-vm.scope.json --profile services <VM IP> > scan.json` | `scan.json` lists the services you expect on the VM (confirm against what the VM actually runs). |
+| 3 | Run a service scan | `hexpath scan run --scope lab-vm.scope.json <VM IP> > scan.json` | `scan.json` lists observed services and includes `cves.coverage`. Incomplete coverage returns status 2 and still writes the results. |
 | 3a | Preview a deeper level | `hexpath scan plan --scope lab-vm.scope.json --level 3 <VM IP>` | Prints a scope-checked all-TCP-port command containing `-p-`; it does not run the scan. |
 | 3b | Preview a focused scan | `hexpath scan plan --scope lab-vm.scope.json --profile services --ports 22,80,443 <VM IP>` | Prints a scope-checked command containing `-p 22,80,443`; invalid or empty port ranges are rejected. |
 | 3c | Preview a filtered-host scan | `hexpath scan plan --scope lab-vm.scope.json --profile services -Pn <VM IP>` | Prints a scope-checked command containing `-Pn`; use it only when the authorized target is known to be online. |
@@ -69,7 +69,7 @@ IPv6), so HexPath refuses every other address. Save this as
 
 | # | Check | Command | Pass criteria |
 |---|-------|---------|---------------|
-| 5 | Check CVEs for the scan | `hexpath cve scan --input scan.json > cves.json` | Finishes without errors. `coverage` shows how many CPEs were checked. |
+| 5 | Refresh CVEs for a saved scan | `hexpath cve scan --input scan.json > cves.json` | Writes a standalone CVE document for the graph check below. `coverage` shows how many CPEs were checked. |
 | 6 | Coverage is honest | inspect `cves.json` | `status` is `vulnerable`, `clean`, or `unknown`. A scan with no services, or one where a lookup failed, is **not** reported as `clean`. |
 | 7 | One CVE lookup | `hexpath cve cpe --cpe cpe:/a:openbsd:openssh:9.6` | Prints `completed: true` and a list of CVEs (needs network to NVD). |
 

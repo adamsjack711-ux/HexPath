@@ -6,7 +6,7 @@ HexPath helps a network pentester answer: **from my current position, what is ex
 
 ## HexPath vs. Nmap demo
 
-The demo compares IPv6 service discovery in a lab and shows how HexPath matches a saved OpenSSH service record to CVE candidates.
+Both tools scan the same OpenSSH service in an isolated IPv6 lab. HexPath detects the version and looks up NVD CVE candidates in the same run.
 
 ![Side-by-side HexPath and Nmap terminal demo](examples/cli-comparison/hexpath-vs-nmap.gif)
 
@@ -20,18 +20,19 @@ Run HexPath directly against a target you are authorized to test:
 hexpath 192.0.2.10
 ```
 
-This checks Nmap's 1,000 most common TCP ports and prints a readable summary.
-Add only the information you need; flags can go before or after the target:
+By default, HexPath checks Nmap's 1,000 most common TCP ports, detects service
+versions, and includes NVD CVE candidates in the same scan results. Flags can
+go before or after the target.
 
 ```sh
-hexpath 192.0.2.10 -sV                 # service versions
+hexpath 192.0.2.10 --no-cves           # basic port scan
+hexpath 192.0.2.10 -sV --no-cves      # service versions without NVD lookups
 hexpath 192.0.2.10 -O                  # OS fingerprint (needs privileges)
-hexpath 192.0.2.10 --cves              # versions plus NVD CVE candidates
 hexpath 192.0.2.10 -p 22,80,443        # selected ports
-hexpath 192.0.2.10 -sV -p-             # versions on all TCP ports
+hexpath 192.0.2.10 -p-                 # versions and CVE lookup on all TCP ports
 hexpath 192.0.2.10 -Pn                # target is online but discovery fails
-hexpath 2001:db8::10 -sV -o scan.json  # save normalized scan JSON
-hexpath lab.example -sV --plan        # resolve and preview, without scanning
+hexpath 2001:db8::10 -o scan.json     # save the scan and CVE candidates as JSON
+hexpath lab.example --plan           # resolve and preview, without scanning
 hexpath path                          # compile the latest scan into candidate paths
 ```
 
@@ -43,12 +44,12 @@ are accepted. Existing CIDR breadth and special-use restrictions still apply.
 No scope file is needed for this form: the supplied targets define the scope.
 Add `--scope scope.json` to constrain them to an existing engagement scope.
 `--json` prints machine-readable results; `-o` saves them while keeping the
-terminal summary. `--cves` adds NVD lookups and returns status 2 if coverage is
-incomplete. CVE candidates are not confirmed vulnerabilities. The default
-scan timeout is five minutes; adjust it with `--timeout SECONDS`.
+terminal summary. HexPath returns status 2 when CVE coverage is incomplete and
+still emits the scan results with coverage details. CVE candidates require
+applicability checks. The Nmap scan timeout defaults to five minutes. Adjust it
+with `--timeout SECONDS`.
 
-Run `hexpath` or `hexpath --help` for these options. The existing `scan`,
-`scope`, `cve`, `graph`, and `assess` commands remain available unchanged.
+Run `hexpath` or `hexpath --help` for these options.
 
 Every completed target-first scan and `hexpath scan run` stores its normalized
 result as Hexpath's latest scan. Run `hexpath path` afterward with no additional
@@ -330,10 +331,15 @@ List these definitions from the CLI with `hexpath scan levels` or the compact
 `hexpath s l`. Add `-j` for JSON. Wait labels are relative: duration depends on
 target count, latency, filtering, and the services encountered. Levels control
 information breadth and probe depth; they are not Nmap `-T` timing templates.
-Level 0 remains the default, and `-L` is mutually exclusive with `-p/--profile`.
+Level 2 (`services`) is the default. Use `--level 0` for discovery only.
+`-L` is mutually exclusive with `-p/--profile`.
 `scan run` keeps a five-minute safety timeout unless `-t/--timeout` is supplied;
 for example, `-t 1800` permits a selected deeper scan to run for up to 30
 minutes without promising that it will finish in that time.
+The `services`, `full`, and `deep` profiles include NVD CVE candidates and
+coverage in the scan JSON. Use `--no-cves` to skip NVD and keep the chosen scan
+profile. Discovery and port-only profiles skip NVD automatically. Incomplete
+CVE coverage returns status 2 and still prints and saves the results.
 
 Preview a discovery command after validating the target against the scope file:
 
@@ -358,7 +364,7 @@ Use `-4` or `-6` on `scan plan` and `scan run` when you want HexPath to verify
 the intended family explicitly. One scan command cannot mix IPv4 and IPv6
 targets; run one command per family when a scope contains both.
 
-Run service detection and save the normalized JSON result:
+Run service detection and save the scan results with embedded CVE candidates:
 
 ```sh
 hexpath scan run \

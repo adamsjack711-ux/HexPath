@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from hexpath.cli import main
 from hexpath.state import load_latest_scan
-from hexpath.vulnerabilities import ScanVulnerabilityResult
+from hexpath.vulnerabilities import CpeIdentity, CpeVulnerabilityResult, ScanVulnerabilityResult
 
 FIXTURE = (Path(__file__).parent / "fixtures/nmap_ipv6_sample.xml").read_text()
 
@@ -36,8 +36,8 @@ class DirectCliTests(unittest.TestCase):
 
     @patch("hexpath.direct_cli.check_scan_documents")
     @patch("hexpath.direct_cli.run_nmap", return_value=FIXTURE)
-    def test_bare_target_scans_and_prints_readable_results_without_cve_requests(self, run, cves):
-        code, output, _ = self.call(["2001:db8:1::10"])
+    def test_no_cves_scans_and_prints_readable_results_without_cve_requests(self, run, cves):
+        code, output, _ = self.call(["2001:db8:1::10", "--no-cves"])
         self.assertEqual(code, 0)
         command = run.call_args.args[0]
         self.assertEqual(command.targets, ("2001:db8:1::10/128",))
@@ -47,6 +47,7 @@ class DirectCliTests(unittest.TestCase):
         self.assertIn("OpenSSH 9.6", output)
         self.assertIn("open|filtered", output)
         self.assertNotIn("80/tcp", output)
+        self.assertIn("CVE lookup skipped", output)
         cves.assert_not_called()
 
     @patch("hexpath.direct_cli.run_nmap")
@@ -61,11 +62,14 @@ class DirectCliTests(unittest.TestCase):
                 self.assertIn(flag, output)
         run.assert_not_called()
 
-    def test_custom_ports_do_not_silently_enable_version_probes(self):
-        code, output, _ = self.call(["192.0.2.10", "-p-", "--plan"])
-        self.assertEqual(code, 0)
-        self.assertIn("-p 1-65535", output)
-        self.assertNotIn("-sV", output)
+    def test_no_cves_can_keep_explicit_version_probes(self):
+        for version_flags, detect_versions in (([], False), (["-sV"], True)):
+            with self.subTest(version_flags=version_flags):
+                code, output, error = self.call(["192.0.2.10", "-p-", "--plan", "--no-cves", *version_flags])
+                self.assertEqual(code, 0)
+                self.assertIn("-p 1-65535", output)
+                self.assertEqual("-sV" in output, detect_versions)
+                self.assertEqual(error, "")
 
     @patch("hexpath.direct_cli.run_nmap")
     def test_invalid_or_unsafe_inputs_never_run_nmap(self, run):
@@ -101,16 +105,25 @@ class DirectCliTests(unittest.TestCase):
 
     @patch("hexpath.direct_cli.check_scan_documents")
     @patch("hexpath.direct_cli.run_nmap", return_value=FIXTURE)
-    def test_cve_option_enables_versions_and_reports_incomplete_coverage(self, run, cves):
-        cves.return_value = ScanVulnerabilityResult((), (), (), 1, ("unknown-service",))
-        code, output, _ = self.call(["2001:db8:1::10", "--cves"])
-        self.assertEqual(code, 2)
-        self.assertIn("-sV", run.call_args.args[0].arguments)
-        self.assertIn("Coverage incomplete", output)
-        cves.assert_called_once()
+    def test_scan_looks_up_cves_by_default_and_reports_incomplete_coverage(self, run, cves):
+        result = ScanVulnerabilityResult((), (), (), 1, ("unknown-service",))
+        cves.return_value = result
+        for flags in ([], ["--cves"]):
+            with self.subTest(flags=flags):
+                cves.reset_mock()
+                code, output, _ = self.call(["2001:db8:1::10", *flags])
+                self.assertEqual(code, 2)
+                self.assertIn("-sV", run.call_args.args[0].arguments)
+                self.assertIn("Coverage incomplete", output)
+                cves.assert_called_once()
+                self.assertEqual(load_latest_scan()["cves"], result.to_dict())
 
+    @patch("hexpath.direct_cli.check_scan_documents")
     @patch("hexpath.direct_cli.run_nmap", return_value=FIXTURE)
-    def test_json_and_saved_results_are_clean_and_keep_scan_document_shape(self, run):
+    def test_default_json_and_saved_results_include_cves(self, run, cves):
+        check = CpeVulnerabilityResult(CpeIdentity("cpe:/a:openbsd:openssh:9.6"), True)
+        result = ScanVulnerabilityResult((check,), (), (), 1)
+        cves.return_value = result
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "scan.json"
             code, output, error = self.call(["2001:db8:1::10", "--json", "-o", str(path)])
@@ -119,6 +132,8 @@ class DirectCliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("hosts", document)
         self.assertIn("services", document)
+        self.assertEqual(document["cves"], result.to_dict())
+        cves.assert_called_once()
         self.assertEqual(document["scope"]["targets"], ["2001:db8:1::10/128"])
         self.assertEqual(load_latest_scan(), document)
         self.assertIn("Scanning", error)

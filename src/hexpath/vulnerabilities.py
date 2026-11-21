@@ -661,6 +661,10 @@ def check_scan_documents(
                         InvalidCpe(service_id=service_id, cpe=raw_cpe, error=str(error)),
                     )
                     continue
+                # Nmap can attach platform context to a service, such as a
+                # generic Linux kernel CPE alongside an OpenSSH version.
+                if identity.value.startswith("cpe:2.3:o:"):
+                    continue
                 if not identity.precise_version:
                     invalid_cpes.setdefault(
                         (service_id, raw_cpe),

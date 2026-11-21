@@ -646,7 +646,7 @@ class ScanVulnerabilityTests(unittest.TestCase):
                          CpeIdentity("cpe:/a:openbsd:openssh:9.6").value)
         self.assertIn("local patch status must be verified", result.matches[0].reason)
 
-    def test_host_os_cpes_remain_inventory_only(self) -> None:
+    def test_os_cpes_remain_inventory_only_even_on_a_service(self) -> None:
         def unexpected_transport(*_args):
             raise AssertionError("inventory-only OS CPE must not be queried")
 
@@ -663,7 +663,7 @@ class ScanVulnerabilityTests(unittest.TestCase):
                 }
             ],
             "services": [
-                {"id": "service:[192.168.56.101]:tcp:445", "cpes": []},
+                {"id": "service:[192.168.56.101]:tcp:445", "cpes": ["cpe:/o:linux:linux_kernel"]},
             ],
         }
 
@@ -690,7 +690,7 @@ class ScanVulnerabilityTests(unittest.TestCase):
 
         self.assertFalse(any(m.service_id.startswith("os:[") for m in result.matches))
 
-    def test_all_services_with_clean_cpes_is_complete_and_clean(self) -> None:
+    def test_versioned_application_cpe_with_generic_os_context_has_complete_coverage(self) -> None:
         client = NvdClient(
             transport=lambda _request, _timeout, _limit: b'{"totalResults":0,"vulnerabilities":[]}'
         )
@@ -698,7 +698,7 @@ class ScanVulnerabilityTests(unittest.TestCase):
             "services": [
                 {
                     "id": "service:[2001:db8::10]:tcp:22",
-                    "cpes": ["cpe:/a:openbsd:openssh:99.0"],
+                    "cpes": ["cpe:/a:openbsd:openssh:99.0", "cpe:/o:linux:linux_kernel"],
                 }
             ]
         }
@@ -707,6 +707,8 @@ class ScanVulnerabilityTests(unittest.TestCase):
 
         self.assertTrue(result.completed)
         self.assertEqual(result.status, VulnerabilityStatus.CLEAN)
+        self.assertEqual(len(result.checks), 1)
+        self.assertEqual(result.checks[0].cpe, CpeIdentity("cpe:/a:openbsd:openssh:99.0"))
 
     def test_scan_with_no_services_is_unknown_not_clean(self) -> None:
         queried: list[str] = []

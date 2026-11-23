@@ -25,6 +25,7 @@ from hexpath.models import (
     Vulnerability,
     VulnerabilityMatch,
 )
+from hexpath.os_exposures import OsCveCandidate, os_candidates_for_host
 
 
 OSV_QUERY_URL = "https://api.osv.dev/v1/query"
@@ -300,6 +301,7 @@ class ScanVulnerabilityResult:
     service_count: int
     unmatched_services: tuple[str, ...] = ()
     invalid_cpes: tuple[InvalidCpe, ...] = ()
+    os_candidates: tuple[OsCveCandidate, ...] = ()
 
     @property
     def completed(self) -> bool:
@@ -342,6 +344,7 @@ class ScanVulnerabilityResult:
             "checks": [check.to_dict() for check in self.checks],
             "vulnerabilities": [item.to_dict() for item in self.vulnerabilities],
             "matches": [item.to_dict() for item in self.matches],
+            "os_candidates": [item.to_dict() for item in self.os_candidates],
         }
 
     def to_json(self, *, indent: int | None = 2) -> str:
@@ -825,6 +828,25 @@ def check_scan_documents(
         service_id for service_id in unmatched_services if service_id not in script_covered
     ]
 
+    # Landmark CVE candidates derived from each host's OS fingerprint. These are
+    # listed for review from the OS guess; they are not verified coverage and do
+    # not change completion status or form access routes.
+    os_candidates: list[OsCveCandidate] = []
+    seen_candidates: set[tuple[str, str]] = set()
+    for document in documents:
+        for host in document.get("hosts", []) or []:
+            if not isinstance(host, dict):
+                continue
+            address = host.get("address")
+            if not isinstance(address, str):
+                continue
+            for candidate in os_candidates_for_host(address, host.get("cpes")):
+                key = (candidate.host, candidate.cve_id)
+                if key in seen_candidates:
+                    continue
+                seen_candidates.add(key)
+                os_candidates.append(candidate)
+
     return ScanVulnerabilityResult(
         checks=checks,
         vulnerabilities=tuple(vulnerabilities.values()),
@@ -832,6 +854,7 @@ def check_scan_documents(
         service_count=len(service_cpes),
         unmatched_services=tuple(unmatched_services),
         invalid_cpes=tuple(invalid_cpes.values()),
+        os_candidates=tuple(os_candidates),
     )
 
 

@@ -901,5 +901,26 @@ class ScriptFindingVulnerabilityTests(unittest.TestCase):
         )
 
 
+class OsCandidateScanTests(unittest.TestCase):
+    def test_os_fingerprint_adds_candidates_without_network(self) -> None:
+        def transport(request, _timeout, _limit):
+            raise AssertionError("OS candidates must not trigger an NVD query")
+
+        document = {
+            "hosts": [{
+                "address": "192.168.56.104",
+                "cpes": ["cpe:/o:microsoft:windows_10"],
+            }],
+            "services": [],
+        }
+        result = check_scan_documents([document], client=NvdClient(transport=transport))
+        ids = {candidate.cve_id for candidate in result.os_candidates}
+        self.assertIn("CVE-2020-0796", ids)
+        # OS candidates are informational and never form routes.
+        self.assertEqual(result.matches, ())
+        payload = result.to_dict()["os_candidates"]
+        self.assertTrue(all(item["applicability"] == "candidate" for item in payload))
+
+
 if __name__ == "__main__":
     unittest.main()

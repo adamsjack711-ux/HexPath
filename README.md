@@ -54,6 +54,20 @@ version guess, but scope, patch status, and impact still need verification
 before it is treated as exploitable. `assess` accepts the same `--smb-vuln`
 flag for live targets.
 
+### CVE candidates from the OS fingerprint
+
+When a scan includes OS detection (`-O`), HexPath lists the landmark,
+network-facing CVEs known for the fingerprinted operating system — for Windows,
+every release from XP onward (for example EternalBlue and BlueKeep on older
+builds, SMBGhost and PrintNightmare on Windows 10 and the current servers).
+
+These are **candidates derived from an OS guess**, not confirmed findings and
+not version matches. They are listed for review, marked low confidence, and
+never form an access route: network OS detection cannot see patch level, which
+is what decides whether any of them actually applies. They give a Windows host —
+whose built-in services report no version — a concrete, prioritized checklist
+instead of only "coverage incomplete."
+
 IPv4 and IPv6 literals are detected automatically; use `-6` to select an IPv6
 address for a hostname. A hostname resolves to one address, which is fixed for
 validation and scanning. Multiple explicit targets of the same address family

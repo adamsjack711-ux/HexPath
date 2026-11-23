@@ -118,6 +118,17 @@ def render_result(document: dict) -> str:
             lines.append(f"  {finding['id']}: {finding['description']}")
         if not cves["completed"]:
             lines.append("Coverage incomplete; missing identities or failed lookups are not a clean result.")
+        os_candidates = cves.get("os_candidates", [])
+        if os_candidates:
+            lines.append("")
+            lines.append("CVE candidates from the OS fingerprint (based on an OS guess; verify patch level):")
+            for candidate in os_candidates:
+                score = candidate.get("cvss_score")
+                severity = f"CVSS {score}" if score is not None else "no CVSS"
+                lines.append(
+                    f"  [{candidate['host']}] {candidate['cve_id']} ({severity}): "
+                    f"{candidate['description']}"
+                )
         lines.append("CVE candidates require applicability checks; they do not prove exploitation.")
     return "\n".join(lines)
 

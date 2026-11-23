@@ -555,6 +555,42 @@ class SmbVulnScriptTests(unittest.TestCase):
         self.assertTrue(finding.confirms_vulnerable)
         self.assertIn("CVE-2017-0144", finding.cve_ids)
 
+    def test_parses_host_level_hostscript_finding(self) -> None:
+        # Nmap commonly reports smb-vuln-ms17-010 under <hostscript>, not the port.
+        xml = """<nmaprun start="1700000000">
+          <host><status state="up" reason="syn-ack"/>
+            <address addr="192.168.56.111" addrtype="ipv4"/>
+            <ports><port protocol="tcp" portid="445">
+              <state state="open" reason="syn-ack"/><service name="microsoft-ds"/>
+            </port></ports>
+            <hostscript>
+              <script id="smb-vuln-ms17-010" output="VULNERABLE: State: VULNERABLE IDs: CVE:CVE-2017-0143">
+                <table key="CVE-2017-0143"><elem key="state">VULNERABLE</elem></table>
+              </script>
+            </hostscript>
+          </host></nmaprun>"""
+        result = parse_nmap_xml(xml)
+        self.assertEqual(len(result.script_findings), 1)
+        finding = result.script_findings[0]
+        self.assertTrue(finding.confirms_vulnerable)
+        self.assertEqual(finding.service_id, "service:[192.168.56.111]:tcp:445")
+        self.assertIn("CVE-2017-0143", finding.cve_ids)
+
+    def test_port_and_host_script_are_not_double_counted(self) -> None:
+        xml = """<nmaprun start="1700000000">
+          <host><status state="up" reason="syn-ack"/>
+            <address addr="192.168.56.111" addrtype="ipv4"/>
+            <ports><port protocol="tcp" portid="445">
+              <state state="open" reason="syn-ack"/>
+              <script id="smb-vuln-ms17-010" output="State: VULNERABLE"/>
+            </port></ports>
+            <hostscript>
+              <script id="smb-vuln-ms17-010" output="State: VULNERABLE"/>
+            </hostscript>
+          </host></nmaprun>"""
+        result = parse_nmap_xml(xml)
+        self.assertEqual(len(result.script_findings), 1)
+
     def test_not_vulnerable_finding_is_not_confirmed(self) -> None:
         xml = """<nmaprun start="1700000000">
           <host><status state="up" reason="syn-ack"/>

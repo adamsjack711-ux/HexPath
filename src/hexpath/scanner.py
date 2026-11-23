@@ -679,6 +679,59 @@ def _script_cve_ids(script: ElementTree.Element, output: str | None) -> tuple[st
     return tuple(dict.fromkeys(found))
 
 
+# Default port for an SMB vulnerability script reported at host level, where
+# Nmap attaches no port element. These scripts all test SMB on 445/tcp.
+_SCRIPT_DEFAULT_PORT: dict[str, tuple[int, str]] = {
+    "smb-vuln-ms17-010": (445, "tcp"),
+    "smb-vuln-ms08-067": (445, "tcp"),
+}
+
+
+def _build_script_finding(
+    script: ElementTree.Element,
+    address: IPAddress,
+    port: int,
+    protocol: TransportProtocol,
+    *,
+    collected_at: datetime,
+    reference: str,
+) -> ScriptFinding | None:
+    output = script.attrib.get("output")
+    state = _script_state(script, output)
+    if state is None:
+        return None
+    script_id = script.attrib["id"]
+    confirmed = state.strip().upper().startswith("VULNERABLE")
+    cve_ids = _script_cve_ids(script, output)
+    if confirmed and not cve_ids:
+        cve_ids = _SCRIPT_FALLBACK_CVES.get(script_id, ())
+    evidence = Evidence(
+        source="nmap-script",
+        summary=(
+            f"Nmap script {script_id} reported state {state} on "
+            f"{protocol.value}/{port}; this is a tested condition, "
+            "not a version guess"
+        ),
+        level=EvidenceLevel.OBSERVED if confirmed else EvidenceLevel.INFERRED,
+        collected_at=collected_at,
+        reference=(
+            f"{reference}#host-{address.compressed}-"
+            f"{protocol.value}-{port}-{script_id}"
+        ),
+    )
+    return ScriptFinding(
+        host=address,
+        port=port,
+        protocol=protocol,
+        script_id=script_id,
+        state=state,
+        cve_ids=cve_ids,
+        title=_script_title(script),
+        output=output,
+        evidence=(evidence,),
+    )
+
+
 def _parse_script_findings(
     host_element: ElementTree.Element,
     address: IPAddress,
@@ -686,8 +739,16 @@ def _parse_script_findings(
     collected_at: datetime,
     reference: str,
 ) -> list[ScriptFinding]:
-    """Collect SMB vulnerability-script findings attached to scanned ports."""
-    findings: list[ScriptFinding] = []
+    """Collect SMB vulnerability-script findings.
+
+    Nmap attaches these either to the scanned port (``ports/port/script``) or,
+    commonly for the SMB vulnerability scripts, to the host as a whole
+    (``hostscript/script``). Both are read; host-level findings are mapped to
+    the SMB port the script tests. Findings are de-duplicated by record id so a
+    script reported both ways is not counted twice.
+    """
+    findings: dict[str, ScriptFinding] = {}
+
     for port_element in host_element.findall("./ports/port"):
         try:
             protocol = TransportProtocol(port_element.attrib["protocol"])
@@ -695,42 +756,25 @@ def _parse_script_findings(
         except (KeyError, ValueError):
             continue
         for script in port_element.findall("script"):
-            script_id = script.attrib.get("id")
-            if script_id not in SMB_VULN_SCRIPTS:
+            if script.attrib.get("id") not in SMB_VULN_SCRIPTS:
                 continue
-            output = script.attrib.get("output")
-            state = _script_state(script, output)
-            if state is None:
-                continue
-            confirmed = state.strip().upper().startswith("VULNERABLE")
-            cve_ids = _script_cve_ids(script, output)
-            if confirmed and not cve_ids:
-                cve_ids = _SCRIPT_FALLBACK_CVES.get(script_id, ())
-            evidence = Evidence(
-                source="nmap-script",
-                summary=(
-                    f"Nmap script {script_id} reported state {state} on "
-                    f"{protocol.value}/{port}; this is a tested condition, "
-                    "not a version guess"
-                ),
-                level=EvidenceLevel.OBSERVED if confirmed else EvidenceLevel.INFERRED,
-                collected_at=collected_at,
-                reference=(
-                    f"{reference}#host-{address.compressed}-"
-                    f"{protocol.value}-{port}-{script_id}"
-                ),
+            finding = _build_script_finding(
+                script, address, port, protocol,
+                collected_at=collected_at, reference=reference,
             )
-            findings.append(
-                ScriptFinding(
-                    host=address,
-                    port=port,
-                    protocol=protocol,
-                    script_id=script_id,
-                    state=state,
-                    cve_ids=cve_ids,
-                    title=_script_title(script),
-                    output=output,
-                    evidence=(evidence,),
-                )
-            )
-    return findings
+            if finding is not None:
+                findings.setdefault(finding.record_id, finding)
+
+    for script in host_element.findall("./hostscript/script"):
+        script_id = script.attrib.get("id")
+        if script_id not in SMB_VULN_SCRIPTS:
+            continue
+        default_port, default_proto = _SCRIPT_DEFAULT_PORT[script_id]
+        finding = _build_script_finding(
+            script, address, default_port, TransportProtocol(default_proto),
+            collected_at=collected_at, reference=reference,
+        )
+        if finding is not None:
+            findings.setdefault(finding.record_id, finding)
+
+    return list(findings.values())

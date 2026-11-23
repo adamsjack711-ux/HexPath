@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from hexpath.graph import GraphError, build_attack_graph, vulnerability_cost
-from hexpath.models import Confidence
+from hexpath.models import normalize_saved_access_evidence, Confidence
 
 
 def compile_path_report(
@@ -34,6 +34,7 @@ def compile_path_report(
     hosts = list(hosts_by_id.values())
     services = list(services_by_id.values())
     vulnerabilities = cves.get("vulnerabilities")
+    cves = normalize_saved_access_evidence(cves)
     matches = cves.get("matches")
     if not isinstance(vulnerabilities, list) or not isinstance(matches, list):
         raise ValueError("CVE results must contain vulnerability and match lists")

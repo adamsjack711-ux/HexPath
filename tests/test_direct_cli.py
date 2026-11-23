@@ -66,7 +66,7 @@ class DirectCliTests(unittest.TestCase):
     def test_smb_vuln_flag_adds_safe_scripts_without_scanning(self, run):
         code, output, _ = self.call(["192.0.2.10", "--smb-vuln", "-Pn", "--plan"])
         self.assertEqual(code, 0)
-        self.assertIn("--script smb-vuln-ms17-010,smb-vuln-ms08-067", output)
+        self.assertIn("--script smb-vuln-ms17-010", output)
         run.assert_not_called()
 
     def test_smb_vuln_absent_by_default(self):

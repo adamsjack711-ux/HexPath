@@ -17,6 +17,34 @@ _CPE_PARTS = {"a", "h", "o"}
 IPAddress = IPv4Address | IPv6Address
 
 
+def normalize_saved_access_evidence(document: dict[str, Any]) -> dict[str, Any]:
+    """Discard legacy access claims supported only by vulnerability-script output."""
+    matches = document.get("matches")
+    if not isinstance(matches, list):
+        return document
+    normalized = []
+    for match in matches:
+        if isinstance(match, dict) and match.get("access_supported") is True:
+            evidence = match.get("access_evidence")
+            if isinstance(evidence, list) and any(
+                isinstance(item, dict) and item.get("source") == "nmap-script"
+                for item in evidence
+            ):
+                independent = [
+                    item for item in evidence
+                    if not isinstance(item, dict) or item.get("source") != "nmap-script"
+                ]
+                match = dict(match)
+                if any(isinstance(item, dict) and item.get("level") == "observed"
+                       for item in independent):
+                    match["access_evidence"] = independent
+                else:
+                    for field in ("access_supported", "access_basis", "access_evidence"):
+                        match.pop(field, None)
+        normalized.append(match)
+    return {**document, "matches": normalized}
+
+
 class ModelError(ValueError):
     """Raised when a HexPath domain record is inconsistent or invalid."""
 
@@ -260,8 +288,8 @@ class ScriptFinding:
     """
 
     host: IPAddress | str
-    port: int
-    protocol: TransportProtocol
+    port: int | None
+    protocol: TransportProtocol | None
     script_id: str
     state: str
     cve_ids: tuple[str, ...] = ()
@@ -271,15 +299,18 @@ class ScriptFinding:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "host", _parse_ip(self.host, "script finding host"))
-        if isinstance(self.port, bool) or not isinstance(self.port, int):
-            raise ModelError("script finding port must be an integer")
-        if not 1 <= self.port <= 65535:
-            raise ModelError("script finding port must be between 1 and 65535")
-        try:
-            protocol = TransportProtocol(self.protocol)
-        except ValueError as error:
-            raise ModelError(f"invalid transport protocol: {self.protocol!r}") from error
-        object.__setattr__(self, "protocol", protocol)
+        if (self.port is None) != (self.protocol is None):
+            raise ModelError("script finding requires both port and protocol or neither")
+        if self.port is not None:
+            if isinstance(self.port, bool) or not isinstance(self.port, int):
+                raise ModelError("script finding port must be an integer")
+            if not 1 <= self.port <= 65535:
+                raise ModelError("script finding port must be between 1 and 65535")
+            try:
+                protocol = TransportProtocol(self.protocol)
+            except ValueError as error:
+                raise ModelError(f"invalid transport protocol: {self.protocol!r}") from error
+            object.__setattr__(self, "protocol", protocol)
         object.__setattr__(self, "script_id", _require_text(self.script_id, "script_id"))
         object.__setattr__(self, "state", _require_text(self.state, "state"))
         cve_ids = tuple(dict.fromkeys(_normalize_cve_id(cve) for cve in self.cve_ids))
@@ -296,12 +327,16 @@ class ScriptFinding:
         return self.state.strip().upper().startswith("VULNERABLE")
 
     @property
-    def service_id(self) -> str:
+    def service_id(self) -> str | None:
         """The record id of the service this finding applies to."""
+        if self.protocol is None:
+            return None
         return f"service:[{self.host.compressed}]:{self.protocol.value}:{self.port}"
 
     @property
     def record_id(self) -> str:
+        if self.protocol is None:
+            return f"script:[{self.host.compressed}]:{self.script_id}"
         return (
             f"script:[{self.host.compressed}]:"
             f"{self.protocol.value}:{self.port}:{self.script_id}"
@@ -313,7 +348,7 @@ class ScriptFinding:
             "service_id": self.service_id,
             "host": self.host.compressed,
             "port": self.port,
-            "protocol": self.protocol.value,
+            "protocol": self.protocol.value if self.protocol else None,
             "script_id": self.script_id,
             "state": self.state,
             "confirms_vulnerable": self.confirms_vulnerable,

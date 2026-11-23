@@ -12,7 +12,7 @@ import json
 import math
 from typing import Any
 
-from hexpath.models import Confidence, Evidence, EvidenceLevel
+from hexpath.models import normalize_saved_access_evidence, Confidence, Evidence, EvidenceLevel
 
 
 ENTRY_NODE_ID = "entry:scanner"
@@ -885,6 +885,7 @@ def build_attack_graph(
         raise GraphError("at least one scan document object is required")
     if not isinstance(cve_document, dict):
         raise GraphError("CVE document must be an object")
+    cve_document = normalize_saved_access_evidence(cve_document)
     raw_vulnerabilities = cve_document.get("vulnerabilities")
     raw_matches = cve_document.get("matches")
     if not isinstance(raw_vulnerabilities, list) or not isinstance(raw_matches, list):

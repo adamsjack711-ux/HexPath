@@ -153,6 +153,19 @@ class WeightTests(unittest.TestCase):
         self.assertIsNone(graph.shortest_path(ENTRY_NODE_ID, "host:2001:db8::10"))
         self.assertFalse(any(edge.relationship == "candidate_exploit" for edge in graph.edges))
 
+    def test_saved_script_access_claim_requires_independent_observation(self) -> None:
+        scan, cves = sample_documents()
+        for match in cves["matches"]:
+            match["access_evidence"] = [
+                {**item, "source": "nmap-script"} for item in match["access_evidence"]
+            ]
+        graph = build_attack_graph(scan, cves)
+        self.assertFalse(any(edge.relationship == "candidate_exploit" for edge in graph.edges))
+        match = cves["matches"][0]
+        match["access_evidence"].append({**match["access_evidence"][0], "source": "operator"})
+        graph = build_attack_graph(scan, cves)
+        self.assertEqual(sum(edge.relationship == "candidate_exploit" for edge in graph.edges), 1)
+
     def test_access_flag_requires_observed_effect_evidence(self) -> None:
         scan, cves = sample_documents()
         cves["matches"][0]["access_evidence"] = []

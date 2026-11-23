@@ -30,24 +30,10 @@ from hexpath.scope import Scope, ScopeError
 
 IPAddress = IPv4Address | IPv6Address
 
-# Nmap NSE scripts run by the opt-in SMB vulnerability check. Both are in
-# Nmap's "safe" set: they probe the SMB vulnerability condition without sending
-# an exploit payload, so they are appropriate for an authorized lab scan.
-SMB_VULN_SCRIPTS = ("smb-vuln-ms17-010", "smb-vuln-ms08-067")
-
-# CVE identifiers used when a script confirms a host vulnerable but its
-# structured output does not enumerate them explicitly.
-_SCRIPT_FALLBACK_CVES: dict[str, tuple[str, ...]] = {
-    "smb-vuln-ms17-010": (
-        "CVE-2017-0143",
-        "CVE-2017-0144",
-        "CVE-2017-0145",
-        "CVE-2017-0146",
-        "CVE-2017-0147",
-        "CVE-2017-0148",
-    ),
-    "smb-vuln-ms08-067": ("CVE-2008-4250",),
-}
+# Only the MS17-010 check is eligible for live scans. Historical scan
+# documents can also contain MS08-067 findings.
+SMB_VULN_SCRIPTS = ("smb-vuln-ms17-010",)
+_IMPORTED_SMB_SCRIPTS = {*SMB_VULN_SCRIPTS, "smb-vuln-ms08-067"}
 
 _CVE_TOKEN = re.compile(r"CVE-\d{4}-\d{4,}", re.IGNORECASE)
 
@@ -686,17 +672,22 @@ def _parse_script_findings(
     collected_at: datetime,
     reference: str,
 ) -> list[ScriptFinding]:
-    """Collect SMB vulnerability-script findings attached to scanned ports."""
+    """Keep host and port observations at their reported scope."""
     findings: list[ScriptFinding] = []
+    groups = [(None, None, host_element.findall("./hostscript/script"))]
     for port_element in host_element.findall("./ports/port"):
         try:
             protocol = TransportProtocol(port_element.attrib["protocol"])
             port = int(port_element.attrib["portid"])
         except (KeyError, ValueError):
             continue
-        for script in port_element.findall("script"):
+        groups.append((protocol, port, port_element.findall("script")))
+
+    for protocol, port, scripts in groups:
+        endpoint = f"{protocol.value}/{port}" if protocol else str(address)
+        for script in scripts:
             script_id = script.attrib.get("id")
-            if script_id not in SMB_VULN_SCRIPTS:
+            if script_id not in _IMPORTED_SMB_SCRIPTS:
                 continue
             output = script.attrib.get("output")
             state = _script_state(script, output)
@@ -704,20 +695,17 @@ def _parse_script_findings(
                 continue
             confirmed = state.strip().upper().startswith("VULNERABLE")
             cve_ids = _script_cve_ids(script, output)
-            if confirmed and not cve_ids:
-                cve_ids = _SCRIPT_FALLBACK_CVES.get(script_id, ())
             evidence = Evidence(
                 source="nmap-script",
                 summary=(
                     f"Nmap script {script_id} reported state {state} on "
-                    f"{protocol.value}/{port}; this is a tested condition, "
-                    "not a version guess"
+                    f"{endpoint}"
                 ),
                 level=EvidenceLevel.OBSERVED if confirmed else EvidenceLevel.INFERRED,
                 collected_at=collected_at,
                 reference=(
                     f"{reference}#host-{address.compressed}-"
-                    f"{protocol.value}-{port}-{script_id}"
+                    f"{endpoint}-{script_id}"
                 ),
             )
             findings.append(

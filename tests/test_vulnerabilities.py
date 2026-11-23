@@ -876,9 +876,10 @@ class ScriptFindingVulnerabilityTests(unittest.TestCase):
         self.assertIn("CVE-2017-0144", vulns)
         self.assertEqual(vulns["CVE-2017-0144"].cvss_score, 8.1)
         match = matches[("service:[192.168.56.101]:tcp:445", "CVE-2017-0144")]
-        self.assertTrue(match.access_supported)
+        self.assertFalse(match.access_supported)
+        self.assertEqual(match.access_evidence, ())
         self.assertEqual(match.confidence.value, "high")
-        self.assertTrue(any(e.level.value == "observed" for e in match.access_evidence))
+        self.assertTrue(any(e.level.value == "observed" for e in match.evidence))
 
     def test_unconfirmed_finding_yields_no_match(self) -> None:
         document = self._confirmed_document()

@@ -500,7 +500,7 @@ class SmbVulnScriptTests(unittest.TestCase):
         self.assertIn("--script", command.arguments)
         script_argument = command.arguments[command.arguments.index("--script") + 1]
         self.assertEqual(
-            script_argument, "smb-vuln-ms17-010,smb-vuln-ms08-067"
+            script_argument, "smb-vuln-ms17-010"
         )
 
     def test_vuln_scripts_omitted_by_default(self) -> None:
@@ -542,7 +542,21 @@ class SmbVulnScriptTests(unittest.TestCase):
         self.assertEqual(finding.service_id, "service:[192.168.56.101]:tcp:445")
         self.assertEqual(finding.evidence[0].level, EvidenceLevel.OBSERVED)
 
-    def test_confirmed_finding_without_ids_uses_fallback(self) -> None:
+    def test_hostscript_exposure_has_no_assumed_port(self) -> None:
+        for script in ("smb-vuln-ms17-010", "smb-vuln-ms08-067"):
+            with self.subTest(script=script):
+                xml = f"""<nmaprun><host><status state="up"/>
+                  <address addr="192.0.2.10" addrtype="ipv4"/>
+                  <hostscript><script id="{script}" output="State: VULNERABLE">
+                    <table><elem key="state">VULNERABLE</elem></table>
+                  </script></hostscript></host></nmaprun>"""
+                finding, = parse_nmap_xml(xml).to_dict()["script_findings"]
+                self.assertTrue(finding["confirms_vulnerable"])
+                self.assertIsNone(finding["service_id"])
+                self.assertIsNone(finding["port"])
+                self.assertIsNone(finding["protocol"])
+
+    def test_confirmed_finding_without_ids_preserves_empty_ids(self) -> None:
         xml = """<nmaprun start="1700000000">
           <host><status state="up" reason="syn-ack"/>
             <address addr="192.168.56.101" addrtype="ipv4"/>
@@ -553,7 +567,7 @@ class SmbVulnScriptTests(unittest.TestCase):
           </host></nmaprun>"""
         finding = parse_nmap_xml(xml).script_findings[0]
         self.assertTrue(finding.confirms_vulnerable)
-        self.assertIn("CVE-2017-0144", finding.cve_ids)
+        self.assertEqual(finding.cve_ids, ())
 
     def test_not_vulnerable_finding_is_not_confirmed(self) -> None:
         xml = """<nmaprun start="1700000000">

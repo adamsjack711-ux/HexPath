@@ -93,6 +93,11 @@ def build_parser() -> argparse.ArgumentParser:
         "DoublePulsar, SambaCry) on live targets for evidence-backed CVEs on "
         "services with no version; opt-in, for authorized labs",
     )
+    assess.add_argument(
+        "--vuln", dest="all_vuln", action="store_true",
+        help="run the full vulnerability-detection set (SMB plus web and FTP) and "
+        "scan their ports; opt-in, for authorized labs",
+    )
     assess.add_argument("targets", nargs="*", help="explicit IPv6 hosts to scan; omit for saved scans")
 
     setup_parser = subcommands.add_parser(
@@ -820,6 +825,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 command = build_nmap_command(
                     scope, targets, ScanProfile.SERVICES,
                     vuln_scripts=getattr(args, "smb_vuln", False),
+                    all_vuln=getattr(args, "all_vuln", False),
                 )
                 xml = run_nmap(command, timeout_seconds=args.timeout)
                 scans.append(parse_nmap_xml(xml, reference="live-nmap", vantage=source).to_dict())

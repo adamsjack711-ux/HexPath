@@ -622,6 +622,13 @@ _SCRIPT_CVE_METADATA: dict[str, tuple[float | None, str]] = {
     "CVE-2017-0148": (8.1, "Microsoft SMBv1 remote code execution (MS17-010, EternalBlue family)."),
     "CVE-2008-4250": (10.0, "Microsoft Server service RPC remote code execution (MS08-067)."),
     "CVE-2017-7494": (9.8, "Samba remote code execution via writable share (SambaCry)."),
+    "CVE-2017-5638": (10.0, "Apache Struts2 remote code execution via the Content-Type header (S2-045)."),
+    "CVE-2017-12617": (8.1, "Apache Tomcat remote code execution via HTTP PUT of a JSP."),
+    "CVE-2015-1427": (7.5, "Elasticsearch Groovy sandbox bypass remote code execution."),
+    "CVE-2014-3704": (7.5, "Drupal core SQL injection ('Drupalgeddon')."),
+    "CVE-2011-3192": (7.8, "Apache HTTP Server Range header denial of service ('Apache Killer')."),
+    "CVE-2011-2523": (9.8, "vsftpd 2.3.4 backdoor command execution."),
+    "CVE-2010-4221": (9.8, "ProFTPD 1.3.3c backdoor / Telnet IAC remote code execution."),
 }
 
 

@@ -57,6 +57,14 @@ version guess, but scope, patch status, and impact still need verification
 before it is treated as exploitable. `assess` accepts the same `--smb-vuln`
 flag for live targets.
 
+`--vuln` runs the **full** detection set — the SMB scripts plus web
+(`http-vuln-*` for Struts, Tomcat, Elasticsearch, Drupal, Apache) and FTP
+(`ftp-vsftpd-backdoor`, `ftp-proftpd-backdoor`) checks — and scans those
+services' ports. It confirms an installed, genuinely vulnerable web or FTP
+service the same way `--smb-vuln` confirms SMB, so a patched Windows host that
+runs a deliberately vulnerable app still yields an evidence-backed finding.
+Opt-in, for authorized labs only.
+
 ### CVE candidates from the OS fingerprint
 
 When a scan includes OS detection (`-O`), HexPath lists the landmark,

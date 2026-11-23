@@ -566,6 +566,36 @@ class SmbVulnScriptTests(unittest.TestCase):
                 vuln_scripts=True,
             )
 
+    def test_all_vuln_runs_full_set_and_scans_ports(self) -> None:
+        command = build_nmap_command(
+            self.scope, ["192.168.56.0/24"], ScanProfile.SERVICES,
+            skip_discovery=True, all_vuln=True,
+        )
+        names = command.arguments[command.arguments.index("--script") + 1].split(",")
+        self.assertIn("smb-vuln-ms17-010", names)
+        self.assertIn("http-vuln-cve2017-12617", names)
+        self.assertIn("ftp-vsftpd-backdoor", names)
+        # web/ftp ports are scanned so the scripts can reach those services
+        ports = command.arguments[command.arguments.index("-p") + 1]
+        self.assertIn("8080", ports.split(","))
+        self.assertIn("21", ports.split(","))
+
+    def test_parses_confirmed_web_finding(self) -> None:
+        xml = """<nmaprun start="1700000000">
+          <host><status state="up" reason="syn-ack"/>
+            <address addr="192.168.56.107" addrtype="ipv4"/>
+            <ports><port protocol="tcp" portid="8080">
+              <state state="open" reason="syn-ack"/><service name="http"/>
+              <script id="http-vuln-cve2017-12617" output="VULNERABLE: State: VULNERABLE IDs: CVE:CVE-2017-12617">
+                <table key="CVE-2017-12617"><elem key="state">VULNERABLE</elem></table>
+              </script>
+            </port></ports>
+          </host></nmaprun>"""
+        finding = parse_nmap_xml(xml).script_findings[0]
+        self.assertTrue(finding.confirms_vulnerable)
+        self.assertEqual(finding.service_id, "service:[192.168.56.107]:tcp:8080")
+        self.assertIn("CVE-2017-12617", finding.cve_ids)
+
     def test_parses_confirmed_ms17_010_finding(self) -> None:
         xml = """<nmaprun start="1700000000">
           <host><status state="up" reason="syn-ack"/>

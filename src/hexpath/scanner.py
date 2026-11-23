@@ -42,6 +42,26 @@ SMB_VULN_SCRIPTS = (
     "smb-vuln-cve-2017-7494",
 )
 
+# Web and FTP vulnerability-detection scripts. These actively test the condition
+# on a web or FTP service (any OS), so an installed, genuinely vulnerable service
+# on a Windows host can be confirmed the same way SMB is.
+WEB_VULN_SCRIPTS = (
+    "http-vuln-cve2017-5638",     # Apache Struts2 content-type RCE
+    "http-vuln-cve2017-12617",    # Apache Tomcat PUT JSP RCE
+    "http-vuln-cve2015-1427",     # Elasticsearch Groovy sandbox RCE
+    "http-vuln-cve2014-3704",     # Drupal "Drupalgeddon" SQL injection
+    "http-vuln-cve2011-3192",     # Apache Range header DoS ("Apache Killer")
+)
+FTP_VULN_SCRIPTS = (
+    "ftp-vsftpd-backdoor",        # vsftpd 2.3.4 backdoor
+    "ftp-proftpd-backdoor",       # ProFTPD 1.3.3c backdoor
+)
+
+# The full vulnerability set run by --vuln, and the ports those services use, so
+# the scan reaches them even when they are not in the default top-ports set.
+ALL_VULN_SCRIPTS = SMB_VULN_SCRIPTS + WEB_VULN_SCRIPTS + FTP_VULN_SCRIPTS
+VULN_PORTS = "21,135,139,445,80,443,8000,8080,8180,8443,9200"
+
 # CVE identifiers used when a script confirms a host vulnerable but its
 # structured output does not enumerate them explicitly.
 _SCRIPT_FALLBACK_CVES: dict[str, tuple[str, ...]] = {
@@ -58,6 +78,13 @@ _SCRIPT_FALLBACK_CVES: dict[str, tuple[str, ...]] = {
     # detected backdoor maps back to the same vulnerability family.
     "smb-double-pulsar-backdoor": ("CVE-2017-0144",),
     "smb-vuln-cve-2017-7494": ("CVE-2017-7494",),
+    "http-vuln-cve2017-5638": ("CVE-2017-5638",),
+    "http-vuln-cve2017-12617": ("CVE-2017-12617",),
+    "http-vuln-cve2015-1427": ("CVE-2015-1427",),
+    "http-vuln-cve2014-3704": ("CVE-2014-3704",),
+    "http-vuln-cve2011-3192": ("CVE-2011-3192",),
+    "ftp-vsftpd-backdoor": ("CVE-2011-2523",),
+    "ftp-proftpd-backdoor": ("CVE-2010-4221",),
 }
 
 _CVE_TOKEN = re.compile(r"CVE-\d{4}-\d{4,}", re.IGNORECASE)
@@ -212,6 +239,7 @@ def build_nmap_command(
     ip_version: int | None = None,
     os_detection: bool = False,
     vuln_scripts: bool = False,
+    all_vuln: bool = False,
     exclude: tuple[str, ...] = (),
 ) -> NmapCommand:
     """Validate targets against scope and construct a conservative command."""
@@ -257,25 +285,32 @@ def build_nmap_command(
         ScanProfile.FULL: ("-sT", "-sV", "--version-light", "-p-"),
         ScanProfile.DEEP: ("-sT", "-sV", "--version-all", "-p-"),
     }[selected_profile]
-    if ports is not None and selected_profile not in (ScanProfile.BASIC, ScanProfile.SERVICES):
+    # --vuln needs the web/FTP ports reachable; add them when no ports were set.
+    effective_ports = ports
+    if all_vuln and effective_ports is None:
+        effective_ports = VULN_PORTS
+    if effective_ports is not None and selected_profile not in (ScanProfile.BASIC, ScanProfile.SERVICES):
         raise ScannerError("ports can be selected only with the basic or services profile")
 
     discovery_arguments = ("-Pn",) if skip_discovery else ()
-    port_arguments = ("-p", _validate_ports(ports)) if ports is not None else ()
+    port_arguments = ("-p", _validate_ports(effective_ports)) if effective_ports is not None else ()
     if os_detection and selected_profile is ScanProfile.DISCOVERY:
         raise ScannerError(
             "OS detection needs a port scan; use it with a scanning profile, "
             "not discovery"
         )
     os_arguments = ("-O",) if os_detection else ()
-    if vuln_scripts and selected_profile is ScanProfile.DISCOVERY:
+    if (vuln_scripts or all_vuln) and selected_profile is ScanProfile.DISCOVERY:
         raise ScannerError(
             "vulnerability scripts need a port scan; use them with a scanning "
             "profile, not discovery"
         )
-    script_arguments = (
-        ("--script", ",".join(SMB_VULN_SCRIPTS)) if vuln_scripts else ()
-    )
+    if all_vuln:
+        script_arguments = ("--script", ",".join(ALL_VULN_SCRIPTS))
+    elif vuln_scripts:
+        script_arguments = ("--script", ",".join(SMB_VULN_SCRIPTS))
+    else:
+        script_arguments = ()
 
     exclude_arguments: tuple[str, ...] = ()
     cleaned_exclude = [entry.strip() for entry in exclude if entry.strip()]
@@ -791,7 +826,7 @@ def _parse_script_findings(
         except (KeyError, ValueError):
             continue
         for script in port_element.findall("script"):
-            if script.attrib.get("id") not in SMB_VULN_SCRIPTS:
+            if script.attrib.get("id") not in ALL_VULN_SCRIPTS:
                 continue
             finding = _build_script_finding(
                 script, address, port, protocol,

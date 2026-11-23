@@ -41,6 +41,12 @@ def build_parser() -> argparse.ArgumentParser:
         "version, such as Windows SMB; opt-in, for authorized labs",
     )
     parser.add_argument(
+        "--vuln", dest="all_vuln", action="store_true",
+        help="run the full vulnerability-detection set (SMB plus web and FTP "
+        "checks) and scan their ports; confirms installed vulnerable web/FTP "
+        "services too. Opt-in, for authorized labs",
+    )
+    parser.add_argument(
         "--exclude", dest="exclude", action="append", default=[], metavar="ADDR",
         help="IP or CIDR to leave out of the scan (e.g. your own scanner); repeatable "
         "or comma-separated",
@@ -168,6 +174,7 @@ def main(argv: list[str]) -> int:
             scope, targets, profile, skip_discovery=args.skip_discovery,
             ports="1-65535" if args.ports == "-" else args.ports, ip_version=args.ip_version,
             vuln_scripts=args.smb_vuln,
+            all_vuln=args.all_vuln,
             exclude=_split_exclude(args.exclude),
         )
         if args.os_detection:

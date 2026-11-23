@@ -9,6 +9,7 @@ from ipaddress import IPv4Address, IPv6Address, ip_address
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 from typing import Any
@@ -19,6 +20,7 @@ from hexpath.models import (
     EvidenceLevel,
     Host,
     ModelError,
+    ScriptFinding,
     Service,
     ServiceState,
     TransportProtocol,
@@ -27,6 +29,27 @@ from hexpath.scope import Scope, ScopeError
 
 
 IPAddress = IPv4Address | IPv6Address
+
+# Nmap NSE scripts run by the opt-in SMB vulnerability check. Both are in
+# Nmap's "safe" set: they probe the SMB vulnerability condition without sending
+# an exploit payload, so they are appropriate for an authorized lab scan.
+SMB_VULN_SCRIPTS = ("smb-vuln-ms17-010", "smb-vuln-ms08-067")
+
+# CVE identifiers used when a script confirms a host vulnerable but its
+# structured output does not enumerate them explicitly.
+_SCRIPT_FALLBACK_CVES: dict[str, tuple[str, ...]] = {
+    "smb-vuln-ms17-010": (
+        "CVE-2017-0143",
+        "CVE-2017-0144",
+        "CVE-2017-0145",
+        "CVE-2017-0146",
+        "CVE-2017-0147",
+        "CVE-2017-0148",
+    ),
+    "smb-vuln-ms08-067": ("CVE-2008-4250",),
+}
+
+_CVE_TOKEN = re.compile(r"CVE-\d{4}-\d{4,}", re.IGNORECASE)
 
 
 class ScannerError(RuntimeError):
@@ -147,17 +170,20 @@ class NmapScanResult:
     hosts: tuple[Host, ...]
     services: tuple[Service, ...]
     vantage: str = "entry:scanner"
+    script_findings: tuple[ScriptFinding, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.vantage, str) or not self.vantage.strip():
             raise ScannerError("scan vantage must be a non-empty string")
         object.__setattr__(self, "vantage", self.vantage.strip())
+        object.__setattr__(self, "script_findings", tuple(self.script_findings))
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "vantage": self.vantage,
             "hosts": [host.to_dict() for host in self.hosts],
             "services": [service.to_dict() for service in self.services],
+            "script_findings": [finding.to_dict() for finding in self.script_findings],
         }
 
     def to_json(self, *, indent: int | None = 2) -> str:
@@ -174,6 +200,7 @@ def build_nmap_command(
     ports: str | None = None,
     ip_version: int | None = None,
     os_detection: bool = False,
+    vuln_scripts: bool = False,
 ) -> NmapCommand:
     """Validate targets against scope and construct a conservative command."""
     if not targets:
@@ -229,6 +256,14 @@ def build_nmap_command(
             "not discovery"
         )
     os_arguments = ("-O",) if os_detection else ()
+    if vuln_scripts and selected_profile is ScanProfile.DISCOVERY:
+        raise ScannerError(
+            "vulnerability scripts need a port scan; use them with a scanning "
+            "profile, not discovery"
+        )
+    script_arguments = (
+        ("--script", ",".join(SMB_VULN_SCRIPTS)) if vuln_scripts else ()
+    )
 
     return NmapCommand(
         arguments=(
@@ -236,6 +271,7 @@ def build_nmap_command(
             + discovery_arguments
             + port_arguments
             + os_arguments
+            + script_arguments
             + profile_arguments
             + authorized_targets
         ),
@@ -365,6 +401,7 @@ def parse_nmap_xml(
     collected_at = _parse_start_time(root.attrib.get("start"))
     hosts: list[Host] = []
     services: list[Service] = []
+    script_findings: list[ScriptFinding] = []
 
     for host_element in root.findall("host"):
         status_element = host_element.find("status")
@@ -420,11 +457,20 @@ def parse_nmap_xml(
                 reference=reference,
             )
         )
+        script_findings.extend(
+            _parse_script_findings(
+                host_element,
+                address,
+                collected_at=collected_at,
+                reference=reference,
+            )
+        )
 
     return NmapScanResult(
         hosts=tuple(hosts),
         services=tuple(services),
         vantage=vantage,
+        script_findings=tuple(script_findings),
     )
 
 
@@ -595,3 +641,96 @@ def _parse_services(
         )
 
     return services
+
+
+def _script_state(script: ElementTree.Element, output: str | None) -> str | None:
+    """Read the vulnerability state an NSE script reported, if any."""
+    for elem in script.iter("elem"):
+        if elem.attrib.get("key") == "state" and elem.text and elem.text.strip():
+            return elem.text.strip()
+    if output:
+        match = re.search(r"State:\s*([A-Za-z][A-Za-z ()]+)", output)
+        if match:
+            return match.group(1).strip()
+        if "NOT VULNERABLE" in output.upper():
+            return "NOT VULNERABLE"
+        if "VULNERABLE" in output.upper():
+            return "LIKELY VULNERABLE"
+    return None
+
+
+def _script_title(script: ElementTree.Element) -> str | None:
+    for elem in script.iter("elem"):
+        if elem.attrib.get("key") == "title" and elem.text and elem.text.strip():
+            return elem.text.strip()
+    return None
+
+
+def _script_cve_ids(script: ElementTree.Element, output: str | None) -> tuple[str, ...]:
+    found: list[str] = []
+    for table in script.iter("table"):
+        key = table.attrib.get("key", "")
+        if _CVE_TOKEN.fullmatch(key):
+            found.append(key.upper())
+    texts = [output] + [elem.text for elem in script.iter("elem")]
+    for text in texts:
+        if text:
+            found.extend(match.group(0).upper() for match in _CVE_TOKEN.finditer(text))
+    return tuple(dict.fromkeys(found))
+
+
+def _parse_script_findings(
+    host_element: ElementTree.Element,
+    address: IPAddress,
+    *,
+    collected_at: datetime,
+    reference: str,
+) -> list[ScriptFinding]:
+    """Collect SMB vulnerability-script findings attached to scanned ports."""
+    findings: list[ScriptFinding] = []
+    for port_element in host_element.findall("./ports/port"):
+        try:
+            protocol = TransportProtocol(port_element.attrib["protocol"])
+            port = int(port_element.attrib["portid"])
+        except (KeyError, ValueError):
+            continue
+        for script in port_element.findall("script"):
+            script_id = script.attrib.get("id")
+            if script_id not in SMB_VULN_SCRIPTS:
+                continue
+            output = script.attrib.get("output")
+            state = _script_state(script, output)
+            if state is None:
+                continue
+            confirmed = state.strip().upper().startswith("VULNERABLE")
+            cve_ids = _script_cve_ids(script, output)
+            if confirmed and not cve_ids:
+                cve_ids = _SCRIPT_FALLBACK_CVES.get(script_id, ())
+            evidence = Evidence(
+                source="nmap-script",
+                summary=(
+                    f"Nmap script {script_id} reported state {state} on "
+                    f"{protocol.value}/{port}; this is a tested condition, "
+                    "not a version guess"
+                ),
+                level=EvidenceLevel.OBSERVED if confirmed else EvidenceLevel.INFERRED,
+                collected_at=collected_at,
+                reference=(
+                    f"{reference}#host-{address.compressed}-"
+                    f"{protocol.value}-{port}-{script_id}"
+                ),
+            )
+            findings.append(
+                ScriptFinding(
+                    host=address,
+                    port=port,
+                    protocol=protocol,
+                    script_id=script_id,
+                    state=state,
+                    cve_ids=cve_ids,
+                    title=_script_title(script),
+                    output=output,
+                    evidence=(evidence,),
+                )
+            )
+    return findings

@@ -250,6 +250,81 @@ class Service:
 
 
 @dataclass(frozen=True, slots=True)
+class ScriptFinding:
+    """A host-level finding reported by an Nmap NSE vulnerability script.
+
+    Unlike a version-based CVE candidate, a confirmed script finding is an
+    observed condition: the script interacted with the service and reported the
+    host as vulnerable. This lets HexPath report evidence-backed CVEs for
+    services that advertise no version, such as Windows SMB.
+    """
+
+    host: IPAddress | str
+    port: int
+    protocol: TransportProtocol
+    script_id: str
+    state: str
+    cve_ids: tuple[str, ...] = ()
+    title: str | None = None
+    output: str | None = None
+    evidence: tuple[Evidence, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "host", _parse_ip(self.host, "script finding host"))
+        if isinstance(self.port, bool) or not isinstance(self.port, int):
+            raise ModelError("script finding port must be an integer")
+        if not 1 <= self.port <= 65535:
+            raise ModelError("script finding port must be between 1 and 65535")
+        try:
+            protocol = TransportProtocol(self.protocol)
+        except ValueError as error:
+            raise ModelError(f"invalid transport protocol: {self.protocol!r}") from error
+        object.__setattr__(self, "protocol", protocol)
+        object.__setattr__(self, "script_id", _require_text(self.script_id, "script_id"))
+        object.__setattr__(self, "state", _require_text(self.state, "state"))
+        cve_ids = tuple(dict.fromkeys(_normalize_cve_id(cve) for cve in self.cve_ids))
+        object.__setattr__(self, "cve_ids", cve_ids)
+        for field_name in ("title", "output"):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(self, field_name, _require_text(value, field_name))
+        object.__setattr__(self, "evidence", tuple(self.evidence))
+
+    @property
+    def confirms_vulnerable(self) -> bool:
+        """True when the script reported the host as vulnerable."""
+        return self.state.strip().upper().startswith("VULNERABLE")
+
+    @property
+    def service_id(self) -> str:
+        """The record id of the service this finding applies to."""
+        return f"service:[{self.host.compressed}]:{self.protocol.value}:{self.port}"
+
+    @property
+    def record_id(self) -> str:
+        return (
+            f"script:[{self.host.compressed}]:"
+            f"{self.protocol.value}:{self.port}:{self.script_id}"
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.record_id,
+            "service_id": self.service_id,
+            "host": self.host.compressed,
+            "port": self.port,
+            "protocol": self.protocol.value,
+            "script_id": self.script_id,
+            "state": self.state,
+            "confirms_vulnerable": self.confirms_vulnerable,
+            "cve_ids": list(self.cve_ids),
+            "title": self.title,
+            "output": self.output,
+            "evidence": [item.to_dict() for item in self.evidence],
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class Vulnerability:
     """Published vulnerability metadata independent of a particular host."""
 

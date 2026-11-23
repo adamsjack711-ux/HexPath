@@ -87,6 +87,11 @@ def build_parser() -> argparse.ArgumentParser:
     assess.add_argument("--cve-timeout", type=float, default=30)
     assess.add_argument("--output", help="save full assessment evidence as JSON")
     assess.add_argument("--json", action="store_true", help="print JSON instead of terminal summary")
+    assess.add_argument(
+        "--smb-vuln", dest="smb_vuln", action="store_true",
+        help="run Nmap's safe SMB vulnerability checks (ms17-010, ms08-067) on live "
+        "targets for evidence-backed CVEs on services with no version",
+    )
     assess.add_argument("targets", nargs="*", help="explicit IPv6 hosts to scan; omit for saved scans")
 
     setup_parser = subcommands.add_parser(
@@ -792,7 +797,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.targets:
                 # This workflow consumes explicit host seeds, never sweeps a prefix.
                 targets = [str(scope.require_authorized(item)) for item in args.targets]
-                command = build_nmap_command(scope, targets, ScanProfile.SERVICES)
+                command = build_nmap_command(
+                    scope, targets, ScanProfile.SERVICES,
+                    vuln_scripts=getattr(args, "smb_vuln", False),
+                )
                 xml = run_nmap(command, timeout_seconds=args.timeout)
                 scans.append(parse_nmap_xml(xml, reference="live-nmap", vantage=source).to_dict())
                 scans = validate_scans(scope, scans)

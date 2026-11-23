@@ -31,10 +31,53 @@ hexpath 192.0.2.10 -O                  # OS fingerprint (needs privileges)
 hexpath 192.0.2.10 -p 22,80,443        # selected ports
 hexpath 192.0.2.10 -p-                 # versions and CVE lookup on all TCP ports
 hexpath 192.0.2.10 -Pn                # target is online but discovery fails
+hexpath 192.0.2.10 --smb-vuln         # confirm SMB vulnerabilities (ms17-010, ms08-067)
+hexpath 192.0.2.0/24 --exclude 192.0.2.5   # sweep a network but skip your own scanner
 hexpath 2001:db8::10 -o scan.json     # save the scan and CVE candidates as JSON
 hexpath lab.example --plan           # resolve and preview, without scanning
 hexpath path                          # compile the latest scan into candidate paths
 ```
+
+### Evidence-backed CVEs for services with no version
+
+CVE lookup matches an exact software version against NVD, so a service that
+advertises no version (such as Windows SMB, RPC, and NetBIOS) returns no
+candidates and is reported as incomplete coverage rather than a clean result.
+
+`--smb-vuln` runs Nmap's SMB vulnerability-detection scripts
+(`smb-vuln-ms17-010`, `smb-vuln-ms08-067`, `smb-double-pulsar-backdoor` and
+`smb-vuln-cve-2017-7494`). They test the vulnerability condition directly. Some
+are intrusive — `smb-vuln-ms08-067` can crash an unpatched host — so the check
+is opt-in and meant for an authorized lab, not a production network. When a
+check confirms a host vulnerable, HexPath records the mapped CVEs as an
+**evidence-backed** finding: the result carries observed evidence and HIGH
+confidence, counts as covered instead of a gap, and supplies the access evidence
+an `assess` route requires. A confirmed finding is a tested condition, not a
+version guess, but scope, patch status, and impact still need verification
+before it is treated as exploitable. `assess` accepts the same `--smb-vuln`
+flag for live targets.
+
+`--vuln` runs the **full** detection set — the SMB scripts plus web
+(`http-vuln-*` for Struts, Tomcat, Elasticsearch, Drupal, Apache) and FTP
+(`ftp-vsftpd-backdoor`, `ftp-proftpd-backdoor`) checks — and scans those
+services' ports. It confirms an installed, genuinely vulnerable web or FTP
+service the same way `--smb-vuln` confirms SMB, so a patched Windows host that
+runs a deliberately vulnerable app still yields an evidence-backed finding.
+Opt-in, for authorized labs only.
+
+### CVE candidates from the OS fingerprint
+
+When a scan includes OS detection (`-O`), HexPath lists the landmark,
+network-facing CVEs known for the fingerprinted operating system — for Windows,
+every release from XP onward (for example EternalBlue and BlueKeep on older
+builds, SMBGhost and PrintNightmare on Windows 10 and the current servers).
+
+These are **candidates derived from an OS guess**, not confirmed findings and
+not version matches. They are listed for review, marked low confidence, and
+never form an access route: network OS detection cannot see patch level, which
+is what decides whether any of them actually applies. They give a Windows host —
+whose built-in services report no version — a concrete, prioritized checklist
+instead of only "coverage incomplete."
 
 IPv4 and IPv6 literals are detected automatically; use `-6` to select an IPv6
 address for a hostname. A hostname resolves to one address, which is fixed for

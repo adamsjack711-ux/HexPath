@@ -565,7 +565,13 @@ class ScanCliTests(unittest.TestCase):
         document = json.loads(output.getvalue())
         self.assertEqual(
             document,
-            {"vantage": "entry:scanner", "hosts": [], "services": [], "cves": result.to_dict()},
+            {
+                "vantage": "entry:scanner",
+                "hosts": [],
+                "services": [],
+                "script_findings": [],
+                "cves": result.to_dict(),
+            },
         )
         self.assertEqual(load_latest_scan(), document)
 

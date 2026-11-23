@@ -483,5 +483,205 @@ class NmapXmlParserTests(unittest.TestCase):
             parse_nmap_xml("<report/>")
 
 
+class ExcludeTargetTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.scope = Scope.from_dict(
+            {"name": "lab", "targets": ["192.168.56.0/24"]}
+        )
+
+    def test_exclude_adds_nmap_exclude_argument(self) -> None:
+        command = build_nmap_command(
+            self.scope, ["192.168.56.0/24"], ScanProfile.SERVICES,
+            exclude=("192.168.56.103", "192.168.56.1"),
+        )
+        self.assertIn("--exclude", command.arguments)
+        value = command.arguments[command.arguments.index("--exclude") + 1]
+        self.assertEqual(value, "192.168.56.103,192.168.56.1")
+        # The exclude list precedes the scan targets.
+        self.assertLess(
+            command.arguments.index("--exclude"),
+            command.arguments.index("192.168.56.0/24"),
+        )
+
+    def test_no_exclude_argument_by_default(self) -> None:
+        command = build_nmap_command(
+            self.scope, ["192.168.56.0/24"], ScanProfile.SERVICES
+        )
+        self.assertNotIn("--exclude", command.arguments)
+
+    def test_blank_exclude_entries_are_ignored(self) -> None:
+        command = build_nmap_command(
+            self.scope, ["192.168.56.0/24"], ScanProfile.SERVICES, exclude=("", "  "),
+        )
+        self.assertNotIn("--exclude", command.arguments)
+
+    def test_invalid_exclude_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ScannerError, "invalid exclude target"):
+            build_nmap_command(
+                self.scope, ["192.168.56.0/24"], ScanProfile.SERVICES,
+                exclude=("not-an-ip",),
+            )
+
+    def test_cidr_exclude_is_accepted(self) -> None:
+        command = build_nmap_command(
+            self.scope, ["192.168.56.0/24"], ScanProfile.SERVICES,
+            exclude=("192.168.56.100/30",),
+        )
+        self.assertIn("192.168.56.100/30", command.arguments)
+
+
+class SmbVulnScriptTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.scope = Scope.from_dict(
+            {"name": "windows lab", "targets": ["192.168.56.0/24"]}
+        )
+
+    def test_vuln_scripts_add_safe_smb_checks(self) -> None:
+        command = build_nmap_command(
+            self.scope,
+            ["192.168.56.101"],
+            ScanProfile.SERVICES,
+            skip_discovery=True,
+            vuln_scripts=True,
+        )
+        self.assertIn("--script", command.arguments)
+        script_argument = command.arguments[command.arguments.index("--script") + 1]
+        names = script_argument.split(",")
+        self.assertIn("smb-vuln-ms17-010", names)
+        self.assertIn("smb-vuln-ms08-067", names)
+        self.assertIn("smb-double-pulsar-backdoor", names)
+
+    def test_vuln_scripts_omitted_by_default(self) -> None:
+        command = build_nmap_command(
+            self.scope, ["192.168.56.101"], ScanProfile.SERVICES
+        )
+        self.assertNotIn("--script", command.arguments)
+
+    def test_vuln_scripts_rejected_with_discovery(self) -> None:
+        with self.assertRaisesRegex(ScannerError, "vulnerability scripts"):
+            build_nmap_command(
+                self.scope,
+                ["192.168.56.101"],
+                ScanProfile.DISCOVERY,
+                vuln_scripts=True,
+            )
+
+    def test_all_vuln_runs_full_set_and_scans_ports(self) -> None:
+        command = build_nmap_command(
+            self.scope, ["192.168.56.0/24"], ScanProfile.SERVICES,
+            skip_discovery=True, all_vuln=True,
+        )
+        names = command.arguments[command.arguments.index("--script") + 1].split(",")
+        self.assertIn("smb-vuln-ms17-010", names)
+        self.assertIn("http-vuln-cve2017-12617", names)
+        self.assertIn("ftp-vsftpd-backdoor", names)
+        # web/ftp ports are scanned so the scripts can reach those services
+        ports = command.arguments[command.arguments.index("-p") + 1]
+        self.assertIn("8080", ports.split(","))
+        self.assertIn("21", ports.split(","))
+
+    def test_parses_confirmed_web_finding(self) -> None:
+        xml = """<nmaprun start="1700000000">
+          <host><status state="up" reason="syn-ack"/>
+            <address addr="192.168.56.107" addrtype="ipv4"/>
+            <ports><port protocol="tcp" portid="8080">
+              <state state="open" reason="syn-ack"/><service name="http"/>
+              <script id="http-vuln-cve2017-12617" output="VULNERABLE: State: VULNERABLE IDs: CVE:CVE-2017-12617">
+                <table key="CVE-2017-12617"><elem key="state">VULNERABLE</elem></table>
+              </script>
+            </port></ports>
+          </host></nmaprun>"""
+        finding = parse_nmap_xml(xml).script_findings[0]
+        self.assertTrue(finding.confirms_vulnerable)
+        self.assertEqual(finding.service_id, "service:[192.168.56.107]:tcp:8080")
+        self.assertIn("CVE-2017-12617", finding.cve_ids)
+
+    def test_parses_confirmed_ms17_010_finding(self) -> None:
+        xml = """<nmaprun start="1700000000">
+          <host><status state="up" reason="syn-ack"/>
+            <address addr="192.168.56.101" addrtype="ipv4"/>
+            <ports><port protocol="tcp" portid="445">
+              <state state="open" reason="syn-ack"/>
+              <service name="microsoft-ds"/>
+              <script id="smb-vuln-ms17-010" output="VULNERABLE: ms17-010 State: VULNERABLE CVE:CVE-2017-0143">
+                <table key="CVE-2017-0143">
+                  <elem key="title">RCE in Microsoft SMBv1 servers (ms17-010)</elem>
+                  <elem key="state">VULNERABLE</elem>
+                </table>
+              </script>
+            </port></ports>
+          </host></nmaprun>"""
+        result = parse_nmap_xml(xml)
+        self.assertEqual(len(result.script_findings), 1)
+        finding = result.script_findings[0]
+        self.assertTrue(finding.confirms_vulnerable)
+        self.assertEqual(finding.script_id, "smb-vuln-ms17-010")
+        self.assertIn("CVE-2017-0143", finding.cve_ids)
+        self.assertEqual(finding.service_id, "service:[192.168.56.101]:tcp:445")
+        self.assertEqual(finding.evidence[0].level, EvidenceLevel.OBSERVED)
+
+    def test_confirmed_finding_without_ids_uses_fallback(self) -> None:
+        xml = """<nmaprun start="1700000000">
+          <host><status state="up" reason="syn-ack"/>
+            <address addr="192.168.56.101" addrtype="ipv4"/>
+            <ports><port protocol="tcp" portid="445">
+              <state state="open" reason="syn-ack"/>
+              <script id="smb-vuln-ms17-010" output="State: VULNERABLE"/>
+            </port></ports>
+          </host></nmaprun>"""
+        finding = parse_nmap_xml(xml).script_findings[0]
+        self.assertTrue(finding.confirms_vulnerable)
+        self.assertIn("CVE-2017-0144", finding.cve_ids)
+
+    def test_parses_host_level_hostscript_finding(self) -> None:
+        # Nmap commonly reports smb-vuln-ms17-010 under <hostscript>, not the port.
+        xml = """<nmaprun start="1700000000">
+          <host><status state="up" reason="syn-ack"/>
+            <address addr="192.168.56.111" addrtype="ipv4"/>
+            <ports><port protocol="tcp" portid="445">
+              <state state="open" reason="syn-ack"/><service name="microsoft-ds"/>
+            </port></ports>
+            <hostscript>
+              <script id="smb-vuln-ms17-010" output="VULNERABLE: State: VULNERABLE IDs: CVE:CVE-2017-0143">
+                <table key="CVE-2017-0143"><elem key="state">VULNERABLE</elem></table>
+              </script>
+            </hostscript>
+          </host></nmaprun>"""
+        result = parse_nmap_xml(xml)
+        self.assertEqual(len(result.script_findings), 1)
+        finding = result.script_findings[0]
+        self.assertTrue(finding.confirms_vulnerable)
+        self.assertEqual(finding.service_id, "service:[192.168.56.111]:tcp:445")
+        self.assertIn("CVE-2017-0143", finding.cve_ids)
+
+    def test_port_and_host_script_are_not_double_counted(self) -> None:
+        xml = """<nmaprun start="1700000000">
+          <host><status state="up" reason="syn-ack"/>
+            <address addr="192.168.56.111" addrtype="ipv4"/>
+            <ports><port protocol="tcp" portid="445">
+              <state state="open" reason="syn-ack"/>
+              <script id="smb-vuln-ms17-010" output="State: VULNERABLE"/>
+            </port></ports>
+            <hostscript>
+              <script id="smb-vuln-ms17-010" output="State: VULNERABLE"/>
+            </hostscript>
+          </host></nmaprun>"""
+        result = parse_nmap_xml(xml)
+        self.assertEqual(len(result.script_findings), 1)
+
+    def test_not_vulnerable_finding_is_not_confirmed(self) -> None:
+        xml = """<nmaprun start="1700000000">
+          <host><status state="up" reason="syn-ack"/>
+            <address addr="192.168.56.101" addrtype="ipv4"/>
+            <ports><port protocol="tcp" portid="445">
+              <state state="open" reason="syn-ack"/>
+              <script id="smb-vuln-ms17-010" output="State: NOT VULNERABLE"/>
+            </port></ports>
+          </host></nmaprun>"""
+        finding = parse_nmap_xml(xml).script_findings[0]
+        self.assertFalse(finding.confirms_vulnerable)
+        self.assertEqual(finding.cve_ids, ())
+
+
 if __name__ == "__main__":
     unittest.main()

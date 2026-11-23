@@ -62,6 +62,26 @@ class DirectCliTests(unittest.TestCase):
                 self.assertIn(flag, output)
         run.assert_not_called()
 
+    @patch("hexpath.direct_cli.run_nmap")
+    def test_smb_vuln_flag_adds_safe_scripts_without_scanning(self, run):
+        code, output, _ = self.call(["192.0.2.10", "--smb-vuln", "-Pn", "--plan"])
+        self.assertEqual(code, 0)
+        self.assertIn("--script smb-vuln-ms17-010,smb-vuln-ms08-067", output)
+        run.assert_not_called()
+
+    def test_smb_vuln_absent_by_default(self):
+        code, output, _ = self.call(["192.0.2.10", "--plan"])
+        self.assertEqual(code, 0)
+        self.assertNotIn("--script", output)
+
+    def test_exclude_flattens_repeated_and_comma_values(self):
+        code, output, _ = self.call([
+            "192.168.56.0/24", "--exclude", "192.168.56.103,192.168.56.1",
+            "--exclude", "192.168.56.5", "--plan",
+        ])
+        self.assertEqual(code, 0)
+        self.assertIn("--exclude 192.168.56.103,192.168.56.1,192.168.56.5", output)
+
     def test_no_cves_can_keep_explicit_version_probes(self):
         for version_flags, detect_versions in (([], False), (["-sV"], True)):
             with self.subTest(version_flags=version_flags):

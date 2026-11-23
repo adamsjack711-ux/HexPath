@@ -21,6 +21,7 @@ from hexpath.vulnerabilities import (
     check_package,
     check_scan_document,
     check_scan_documents,
+    matches_from_script_documents,
 )
 
 
@@ -852,6 +853,73 @@ class ScanVulnerabilityTests(unittest.TestCase):
                 "service:[2001:db8::20]:tcp:443",
             },
         )
+
+
+class ScriptFindingVulnerabilityTests(unittest.TestCase):
+    def _confirmed_document(self) -> dict:
+        return {
+            "services": [{
+                "id": "service:[192.168.56.101]:tcp:445",
+                "cpes": [],
+            }],
+            "script_findings": [{
+                "service_id": "service:[192.168.56.101]:tcp:445",
+                "script_id": "smb-vuln-ms17-010",
+                "state": "VULNERABLE",
+                "confirms_vulnerable": True,
+                "cve_ids": ["CVE-2017-0144"],
+            }],
+        }
+
+    def test_confirmed_finding_becomes_evidence_backed_match(self) -> None:
+        vulns, matches = matches_from_script_documents([self._confirmed_document()])
+        self.assertIn("CVE-2017-0144", vulns)
+        self.assertEqual(vulns["CVE-2017-0144"].cvss_score, 8.1)
+        match = matches[("service:[192.168.56.101]:tcp:445", "CVE-2017-0144")]
+        self.assertTrue(match.access_supported)
+        self.assertEqual(match.confidence.value, "high")
+        self.assertTrue(any(e.level.value == "observed" for e in match.access_evidence))
+
+    def test_unconfirmed_finding_yields_no_match(self) -> None:
+        document = self._confirmed_document()
+        document["script_findings"][0]["confirms_vulnerable"] = False
+        vulns, matches = matches_from_script_documents([document])
+        self.assertEqual((vulns, matches), ({}, {}))
+
+    def test_confirmed_finding_completes_coverage_without_network(self) -> None:
+        def transport(request, _timeout, _limit):
+            raise AssertionError("NVD must not be queried for a version-less service")
+
+        result = check_scan_documents(
+            [self._confirmed_document()], client=NvdClient(transport=transport),
+        )
+        self.assertTrue(result.completed)
+        self.assertEqual(result.status, VulnerabilityStatus.VULNERABLE)
+        self.assertEqual(result.unmatched_services, ())
+        self.assertEqual(
+            [match.cve_id for match in result.matches], ["CVE-2017-0144"]
+        )
+
+
+class OsCandidateScanTests(unittest.TestCase):
+    def test_os_fingerprint_adds_candidates_without_network(self) -> None:
+        def transport(request, _timeout, _limit):
+            raise AssertionError("OS candidates must not trigger an NVD query")
+
+        document = {
+            "hosts": [{
+                "address": "192.168.56.104",
+                "cpes": ["cpe:/o:microsoft:windows_10"],
+            }],
+            "services": [],
+        }
+        result = check_scan_documents([document], client=NvdClient(transport=transport))
+        ids = {candidate.cve_id for candidate in result.os_candidates}
+        self.assertIn("CVE-2020-0796", ids)
+        # OS candidates are informational and never form routes.
+        self.assertEqual(result.matches, ())
+        payload = result.to_dict()["os_candidates"]
+        self.assertTrue(all(item["applicability"] == "candidate" for item in payload))
 
 
 if __name__ == "__main__":

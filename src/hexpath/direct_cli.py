@@ -34,6 +34,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="look up CVE candidates (default). Use --no-cves to skip lookup, with -sV for version probes",
     )
     parser.add_argument("-p", "--ports", help="ports or ranges, e.g. 22,80,443 or 1-1000; '-' means all TCP ports")
+    parser.add_argument(
+        "--smb-vuln", dest="smb_vuln", action="store_true",
+        help="run Nmap's SMB vulnerability-detection scripts (ms17-010, ms08-067, "
+        "DoublePulsar, SambaCry) for evidence-backed CVEs on services with no "
+        "version, such as Windows SMB; opt-in, for authorized labs",
+    )
+    parser.add_argument(
+        "--vuln", dest="all_vuln", action="store_true",
+        help="run the full vulnerability-detection set (SMB plus web and FTP "
+        "checks) and scan their ports; confirms installed vulnerable web/FTP "
+        "services too. Opt-in, for authorized labs",
+    )
+    parser.add_argument(
+        "--exclude", dest="exclude", action="append", default=[], metavar="ADDR",
+        help="IP or CIDR to leave out of the scan (e.g. your own scanner); repeatable "
+        "or comma-separated",
+    )
     parser.add_argument("-Pn", dest="skip_discovery", action="store_true", help="skip host discovery")
     family = parser.add_mutually_exclusive_group()
     family.add_argument("-4", dest="ip_version", action="store_const", const=4, help="use IPv4")
@@ -70,6 +87,17 @@ def resolve_targets(targets: list[str], version: int | None) -> list[str]:
     return list(dict.fromkeys(resolved))
 
 
+def _split_exclude(values: list[str]) -> tuple[str, ...]:
+    """Flatten repeated and comma-separated --exclude values into a tuple."""
+    result: list[str] = []
+    for value in values or []:
+        for part in value.split(","):
+            part = part.strip()
+            if part and part not in result:
+                result.append(part)
+    return tuple(result)
+
+
 def render_result(document: dict) -> str:
     lines = ["HexPath scan results", ""]
     for host in document["hosts"]:
@@ -90,6 +118,19 @@ def render_result(document: dict) -> str:
         lines.append("")
     if not document["hosts"]:
         lines.append("No hosts reported up. If the target is online, try -Pn.")
+    confirmed = [
+        finding for finding in document.get("script_findings", [])
+        if finding.get("confirms_vulnerable")
+    ]
+    if confirmed:
+        lines.append("Confirmed by Nmap vulnerability scripts (evidence-backed):")
+        for finding in confirmed:
+            cve_ids = ", ".join(finding.get("cve_ids", [])) or "no CVE id reported"
+            lines.append(
+                f"  [{finding['host']}] {finding['port']}/{finding['protocol']} "
+                f"{finding['script_id']}: {finding['state']} — {cve_ids}"
+            )
+        lines.append("")
     cves = document.get("cves")
     if cves is None:
         lines.append("CVE lookup skipped (--no-cves).")
@@ -100,6 +141,17 @@ def render_result(document: dict) -> str:
             lines.append(f"  {finding['id']}: {finding['description']}")
         if not cves["completed"]:
             lines.append("Coverage incomplete; missing identities or failed lookups are not a clean result.")
+        os_candidates = cves.get("os_candidates", [])
+        if os_candidates:
+            lines.append("")
+            lines.append("CVE candidates from the OS fingerprint (based on an OS guess; verify patch level):")
+            for candidate in os_candidates:
+                score = candidate.get("cvss_score")
+                severity = f"CVSS {score}" if score is not None else "no CVSS"
+                lines.append(
+                    f"  [{candidate['host']}] {candidate['cve_id']} ({severity}): "
+                    f"{candidate['description']}"
+                )
         lines.append("CVE candidates require applicability checks; they do not prove exploitation.")
     return "\n".join(lines)
 
@@ -121,6 +173,9 @@ def main(argv: list[str]) -> int:
         command = build_nmap_command(
             scope, targets, profile, skip_discovery=args.skip_discovery,
             ports="1-65535" if args.ports == "-" else args.ports, ip_version=args.ip_version,
+            vuln_scripts=args.smb_vuln,
+            all_vuln=args.all_vuln,
+            exclude=_split_exclude(args.exclude),
         )
         if args.os_detection:
             command = replace(command, arguments=(command.arguments[0], "-O", *command.arguments[1:]))

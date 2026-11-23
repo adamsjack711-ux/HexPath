@@ -5,10 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
-from ipaddress import IPv4Address, IPv6Address, ip_address
+from ipaddress import IPv4Address, IPv6Address, ip_address, ip_network
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 from typing import Any
@@ -19,6 +20,7 @@ from hexpath.models import (
     EvidenceLevel,
     Host,
     ModelError,
+    ScriptFinding,
     Service,
     ServiceState,
     TransportProtocol,
@@ -27,6 +29,65 @@ from hexpath.scope import Scope, ScopeError
 
 
 IPAddress = IPv4Address | IPv6Address
+
+# Nmap NSE vulnerability-detection scripts run by the opt-in SMB check. They
+# test the vulnerability condition directly, which is what lets HexPath report an
+# evidence-backed finding for a service that advertises no version. Some are
+# intrusive (ms08-067 in particular can crash an unpatched host), so this check
+# is opt-in and intended for an authorized lab, not a production network.
+SMB_VULN_SCRIPTS = (
+    "smb-vuln-ms17-010",
+    "smb-vuln-ms08-067",
+    "smb-double-pulsar-backdoor",
+    "smb-vuln-cve-2017-7494",
+)
+
+# Web and FTP vulnerability-detection scripts. These actively test the condition
+# on a web or FTP service (any OS), so an installed, genuinely vulnerable service
+# on a Windows host can be confirmed the same way SMB is.
+WEB_VULN_SCRIPTS = (
+    "http-vuln-cve2017-5638",     # Apache Struts2 content-type RCE
+    "http-vuln-cve2017-12617",    # Apache Tomcat PUT JSP RCE
+    "http-vuln-cve2015-1427",     # Elasticsearch Groovy sandbox RCE
+    "http-vuln-cve2014-3704",     # Drupal "Drupalgeddon" SQL injection
+    "http-vuln-cve2011-3192",     # Apache Range header DoS ("Apache Killer")
+)
+FTP_VULN_SCRIPTS = (
+    "ftp-vsftpd-backdoor",        # vsftpd 2.3.4 backdoor
+    "ftp-proftpd-backdoor",       # ProFTPD 1.3.3c backdoor
+)
+
+# The full vulnerability set run by --vuln, and the ports those services use, so
+# the scan reaches them even when they are not in the default top-ports set.
+ALL_VULN_SCRIPTS = SMB_VULN_SCRIPTS + WEB_VULN_SCRIPTS + FTP_VULN_SCRIPTS
+VULN_PORTS = "21,135,139,445,80,443,8000,8080,8180,8443,9200"
+
+# CVE identifiers used when a script confirms a host vulnerable but its
+# structured output does not enumerate them explicitly.
+_SCRIPT_FALLBACK_CVES: dict[str, tuple[str, ...]] = {
+    "smb-vuln-ms17-010": (
+        "CVE-2017-0143",
+        "CVE-2017-0144",
+        "CVE-2017-0145",
+        "CVE-2017-0146",
+        "CVE-2017-0147",
+        "CVE-2017-0148",
+    ),
+    "smb-vuln-ms08-067": ("CVE-2008-4250",),
+    # DoublePulsar is the implant commonly dropped through the MS17-010 flaw; a
+    # detected backdoor maps back to the same vulnerability family.
+    "smb-double-pulsar-backdoor": ("CVE-2017-0144",),
+    "smb-vuln-cve-2017-7494": ("CVE-2017-7494",),
+    "http-vuln-cve2017-5638": ("CVE-2017-5638",),
+    "http-vuln-cve2017-12617": ("CVE-2017-12617",),
+    "http-vuln-cve2015-1427": ("CVE-2015-1427",),
+    "http-vuln-cve2014-3704": ("CVE-2014-3704",),
+    "http-vuln-cve2011-3192": ("CVE-2011-3192",),
+    "ftp-vsftpd-backdoor": ("CVE-2011-2523",),
+    "ftp-proftpd-backdoor": ("CVE-2010-4221",),
+}
+
+_CVE_TOKEN = re.compile(r"CVE-\d{4}-\d{4,}", re.IGNORECASE)
 
 
 class ScannerError(RuntimeError):
@@ -147,17 +208,20 @@ class NmapScanResult:
     hosts: tuple[Host, ...]
     services: tuple[Service, ...]
     vantage: str = "entry:scanner"
+    script_findings: tuple[ScriptFinding, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.vantage, str) or not self.vantage.strip():
             raise ScannerError("scan vantage must be a non-empty string")
         object.__setattr__(self, "vantage", self.vantage.strip())
+        object.__setattr__(self, "script_findings", tuple(self.script_findings))
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "vantage": self.vantage,
             "hosts": [host.to_dict() for host in self.hosts],
             "services": [service.to_dict() for service in self.services],
+            "script_findings": [finding.to_dict() for finding in self.script_findings],
         }
 
     def to_json(self, *, indent: int | None = 2) -> str:
@@ -174,6 +238,9 @@ def build_nmap_command(
     ports: str | None = None,
     ip_version: int | None = None,
     os_detection: bool = False,
+    vuln_scripts: bool = False,
+    all_vuln: bool = False,
+    exclude: tuple[str, ...] = (),
 ) -> NmapCommand:
     """Validate targets against scope and construct a conservative command."""
     if not targets:
@@ -218,17 +285,40 @@ def build_nmap_command(
         ScanProfile.FULL: ("-sT", "-sV", "--version-light", "-p-"),
         ScanProfile.DEEP: ("-sT", "-sV", "--version-all", "-p-"),
     }[selected_profile]
-    if ports is not None and selected_profile not in (ScanProfile.BASIC, ScanProfile.SERVICES):
+    # --vuln needs the web/FTP ports reachable; add them when no ports were set.
+    effective_ports = ports
+    if all_vuln and effective_ports is None:
+        effective_ports = VULN_PORTS
+    if effective_ports is not None and selected_profile not in (ScanProfile.BASIC, ScanProfile.SERVICES):
         raise ScannerError("ports can be selected only with the basic or services profile")
 
     discovery_arguments = ("-Pn",) if skip_discovery else ()
-    port_arguments = ("-p", _validate_ports(ports)) if ports is not None else ()
+    port_arguments = ("-p", _validate_ports(effective_ports)) if effective_ports is not None else ()
     if os_detection and selected_profile is ScanProfile.DISCOVERY:
         raise ScannerError(
             "OS detection needs a port scan; use it with a scanning profile, "
             "not discovery"
         )
     os_arguments = ("-O",) if os_detection else ()
+    if (vuln_scripts or all_vuln) and selected_profile is ScanProfile.DISCOVERY:
+        raise ScannerError(
+            "vulnerability scripts need a port scan; use them with a scanning "
+            "profile, not discovery"
+        )
+    if all_vuln:
+        script_arguments = ("--script", ",".join(ALL_VULN_SCRIPTS))
+    elif vuln_scripts:
+        script_arguments = ("--script", ",".join(SMB_VULN_SCRIPTS))
+    else:
+        script_arguments = ()
+
+    exclude_arguments: tuple[str, ...] = ()
+    cleaned_exclude = [entry.strip() for entry in exclude if entry.strip()]
+    for entry in cleaned_exclude:
+        if not _is_valid_exclude_target(entry):
+            raise ScannerError(f"invalid exclude target: {entry!r}")
+    if cleaned_exclude:
+        exclude_arguments = ("--exclude", ",".join(cleaned_exclude))
 
     return NmapCommand(
         arguments=(
@@ -236,6 +326,8 @@ def build_nmap_command(
             + discovery_arguments
             + port_arguments
             + os_arguments
+            + script_arguments
+            + exclude_arguments
             + profile_arguments
             + authorized_targets
         ),
@@ -243,6 +335,20 @@ def build_nmap_command(
         profile=selected_profile,
         ip_version=selected_version,
     )
+
+
+def _is_valid_exclude_target(value: str) -> bool:
+    """Accept a single IP address or a CIDR network to exclude from a scan."""
+    try:
+        ip_address(value)
+        return True
+    except ValueError:
+        pass
+    try:
+        ip_network(value, strict=False)
+        return True
+    except ValueError:
+        return False
 
 
 def _validate_ports(value: str) -> str:
@@ -365,6 +471,7 @@ def parse_nmap_xml(
     collected_at = _parse_start_time(root.attrib.get("start"))
     hosts: list[Host] = []
     services: list[Service] = []
+    script_findings: list[ScriptFinding] = []
 
     for host_element in root.findall("host"):
         status_element = host_element.find("status")
@@ -420,11 +527,20 @@ def parse_nmap_xml(
                 reference=reference,
             )
         )
+        script_findings.extend(
+            _parse_script_findings(
+                host_element,
+                address,
+                collected_at=collected_at,
+                reference=reference,
+            )
+        )
 
     return NmapScanResult(
         hosts=tuple(hosts),
         services=tuple(services),
         vantage=vantage,
+        script_findings=tuple(script_findings),
     )
 
 
@@ -595,3 +711,140 @@ def _parse_services(
         )
 
     return services
+
+
+def _script_state(script: ElementTree.Element, output: str | None) -> str | None:
+    """Read the vulnerability state an NSE script reported, if any."""
+    for elem in script.iter("elem"):
+        if elem.attrib.get("key") == "state" and elem.text and elem.text.strip():
+            return elem.text.strip()
+    if output:
+        match = re.search(r"State:\s*([A-Za-z][A-Za-z ()]+)", output)
+        if match:
+            return match.group(1).strip()
+        if "NOT VULNERABLE" in output.upper():
+            return "NOT VULNERABLE"
+        if "VULNERABLE" in output.upper():
+            return "LIKELY VULNERABLE"
+    return None
+
+
+def _script_title(script: ElementTree.Element) -> str | None:
+    for elem in script.iter("elem"):
+        if elem.attrib.get("key") == "title" and elem.text and elem.text.strip():
+            return elem.text.strip()
+    return None
+
+
+def _script_cve_ids(script: ElementTree.Element, output: str | None) -> tuple[str, ...]:
+    found: list[str] = []
+    for table in script.iter("table"):
+        key = table.attrib.get("key", "")
+        if _CVE_TOKEN.fullmatch(key):
+            found.append(key.upper())
+    texts = [output] + [elem.text for elem in script.iter("elem")]
+    for text in texts:
+        if text:
+            found.extend(match.group(0).upper() for match in _CVE_TOKEN.finditer(text))
+    return tuple(dict.fromkeys(found))
+
+
+# Default port for an SMB vulnerability script reported at host level, where
+# Nmap attaches no port element. These scripts all test SMB on 445/tcp.
+_SCRIPT_DEFAULT_PORT: dict[str, tuple[int, str]] = {
+    "smb-vuln-ms17-010": (445, "tcp"),
+    "smb-vuln-ms08-067": (445, "tcp"),
+}
+
+
+def _build_script_finding(
+    script: ElementTree.Element,
+    address: IPAddress,
+    port: int,
+    protocol: TransportProtocol,
+    *,
+    collected_at: datetime,
+    reference: str,
+) -> ScriptFinding | None:
+    output = script.attrib.get("output")
+    state = _script_state(script, output)
+    if state is None:
+        return None
+    script_id = script.attrib["id"]
+    confirmed = state.strip().upper().startswith("VULNERABLE")
+    cve_ids = _script_cve_ids(script, output)
+    if confirmed and not cve_ids:
+        cve_ids = _SCRIPT_FALLBACK_CVES.get(script_id, ())
+    evidence = Evidence(
+        source="nmap-script",
+        summary=(
+            f"Nmap script {script_id} reported state {state} on "
+            f"{protocol.value}/{port}; this is a tested condition, "
+            "not a version guess"
+        ),
+        level=EvidenceLevel.OBSERVED if confirmed else EvidenceLevel.INFERRED,
+        collected_at=collected_at,
+        reference=(
+            f"{reference}#host-{address.compressed}-"
+            f"{protocol.value}-{port}-{script_id}"
+        ),
+    )
+    return ScriptFinding(
+        host=address,
+        port=port,
+        protocol=protocol,
+        script_id=script_id,
+        state=state,
+        cve_ids=cve_ids,
+        title=_script_title(script),
+        output=output,
+        evidence=(evidence,),
+    )
+
+
+def _parse_script_findings(
+    host_element: ElementTree.Element,
+    address: IPAddress,
+    *,
+    collected_at: datetime,
+    reference: str,
+) -> list[ScriptFinding]:
+    """Collect SMB vulnerability-script findings.
+
+    Nmap attaches these either to the scanned port (``ports/port/script``) or,
+    commonly for the SMB vulnerability scripts, to the host as a whole
+    (``hostscript/script``). Both are read; host-level findings are mapped to
+    the SMB port the script tests. Findings are de-duplicated by record id so a
+    script reported both ways is not counted twice.
+    """
+    findings: dict[str, ScriptFinding] = {}
+
+    for port_element in host_element.findall("./ports/port"):
+        try:
+            protocol = TransportProtocol(port_element.attrib["protocol"])
+            port = int(port_element.attrib["portid"])
+        except (KeyError, ValueError):
+            continue
+        for script in port_element.findall("script"):
+            if script.attrib.get("id") not in ALL_VULN_SCRIPTS:
+                continue
+            finding = _build_script_finding(
+                script, address, port, protocol,
+                collected_at=collected_at, reference=reference,
+            )
+            if finding is not None:
+                findings.setdefault(finding.record_id, finding)
+
+    for script in host_element.findall("./hostscript/script"):
+        script_id = script.attrib.get("id")
+        if script_id not in SMB_VULN_SCRIPTS:
+            continue
+        default_port, default_proto = _SCRIPT_DEFAULT_PORT[script_id]
+        finding = _build_script_finding(
+            script, address, default_port, TransportProtocol(default_proto),
+            collected_at=collected_at, reference=reference,
+        )
+        if finding is not None:
+            findings.setdefault(finding.record_id, finding)
+
+    return list(findings.values())

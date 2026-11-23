@@ -25,6 +25,7 @@ from hexpath.models import (
     Vulnerability,
     VulnerabilityMatch,
 )
+from hexpath.os_exposures import OsCveCandidate, os_candidates_for_host
 
 
 OSV_QUERY_URL = "https://api.osv.dev/v1/query"
@@ -300,6 +301,7 @@ class ScanVulnerabilityResult:
     service_count: int
     unmatched_services: tuple[str, ...] = ()
     invalid_cpes: tuple[InvalidCpe, ...] = ()
+    os_candidates: tuple[OsCveCandidate, ...] = ()
 
     @property
     def completed(self) -> bool:
@@ -342,6 +344,7 @@ class ScanVulnerabilityResult:
             "checks": [check.to_dict() for check in self.checks],
             "vulnerabilities": [item.to_dict() for item in self.vulnerabilities],
             "matches": [item.to_dict() for item in self.matches],
+            "os_candidates": [item.to_dict() for item in self.os_candidates],
         }
 
     def to_json(self, *, indent: int | None = 2) -> str:
@@ -606,6 +609,102 @@ def check_cpe(
     )
 
 
+# Published metadata for CVEs confirmed by Nmap's SMB vulnerability scripts.
+# These services advertise no version, so NVD cannot be queried by CPE; the
+# script confirms the condition directly, and this table supplies a readable
+# description and CVSS for the terminal and assessment summaries.
+_SCRIPT_CVE_METADATA: dict[str, tuple[float | None, str]] = {
+    "CVE-2017-0143": (8.1, "Microsoft SMBv1 remote code execution (MS17-010, EternalBlue family)."),
+    "CVE-2017-0144": (8.1, "Microsoft SMBv1 remote code execution (MS17-010, EternalBlue)."),
+    "CVE-2017-0145": (8.1, "Microsoft SMBv1 remote code execution (MS17-010, EternalBlue family)."),
+    "CVE-2017-0146": (8.1, "Microsoft SMBv1 remote code execution (MS17-010, EternalBlue family)."),
+    "CVE-2017-0147": (5.9, "Microsoft SMBv1 information disclosure (MS17-010, EternalRomance family)."),
+    "CVE-2017-0148": (8.1, "Microsoft SMBv1 remote code execution (MS17-010, EternalBlue family)."),
+    "CVE-2008-4250": (10.0, "Microsoft Server service RPC remote code execution (MS08-067)."),
+    "CVE-2017-7494": (9.8, "Samba remote code execution via writable share (SambaCry)."),
+    "CVE-2017-5638": (10.0, "Apache Struts2 remote code execution via the Content-Type header (S2-045)."),
+    "CVE-2017-12617": (8.1, "Apache Tomcat remote code execution via HTTP PUT of a JSP."),
+    "CVE-2015-1427": (7.5, "Elasticsearch Groovy sandbox bypass remote code execution."),
+    "CVE-2014-3704": (7.5, "Drupal core SQL injection ('Drupalgeddon')."),
+    "CVE-2011-3192": (7.8, "Apache HTTP Server Range header denial of service ('Apache Killer')."),
+    "CVE-2011-2523": (9.8, "vsftpd 2.3.4 backdoor command execution."),
+    "CVE-2010-4221": (9.8, "ProFTPD 1.3.3c backdoor / Telnet IAC remote code execution."),
+}
+
+
+def matches_from_script_documents(
+    documents: Any,
+) -> tuple[dict[str, Vulnerability], dict[tuple[str, str], VulnerabilityMatch]]:
+    """Turn confirmed Nmap vulnerability-script findings into evidence-backed
+    CVE matches.
+
+    A confirmed finding is an observed condition rather than a version guess, so
+    the resulting matches carry observed access evidence and HIGH confidence.
+    """
+    vulnerabilities: dict[str, Vulnerability] = {}
+    matches: dict[tuple[str, str], VulnerabilityMatch] = {}
+    for document in documents:
+        if not isinstance(document, dict):
+            continue
+        findings = document.get("script_findings")
+        if not isinstance(findings, list):
+            continue
+        for finding in findings:
+            if not isinstance(finding, dict) or not finding.get("confirms_vulnerable"):
+                continue
+            service_id = finding.get("service_id")
+            script_id = finding.get("script_id", "a vulnerability script")
+            state = finding.get("state", "VULNERABLE")
+            cve_ids = finding.get("cve_ids")
+            if not isinstance(service_id, str) or not isinstance(cve_ids, list):
+                continue
+            for cve_id in cve_ids:
+                if not isinstance(cve_id, str):
+                    continue
+                cvss, description = _SCRIPT_CVE_METADATA.get(
+                    cve_id.upper(),
+                    (None, f"Confirmed vulnerable by Nmap script {script_id}."),
+                )
+                try:
+                    vulnerability = Vulnerability(
+                        cve_id=cve_id, description=description, cvss_score=cvss,
+                    )
+                except (ValueError, TypeError):
+                    continue
+                vulnerabilities.setdefault(vulnerability.cve_id, vulnerability)
+                key = (service_id, vulnerability.cve_id)
+                if key in matches:
+                    continue
+                evidence = Evidence(
+                    source="nmap-script",
+                    summary=(
+                        f"Nmap script {script_id} reported state {state} for "
+                        f"{service_id}; the vulnerable condition was tested directly"
+                    ),
+                    level=EvidenceLevel.OBSERVED,
+                    reference=f"https://nvd.nist.gov/vuln/detail/{vulnerability.cve_id}",
+                )
+                matches[key] = VulnerabilityMatch(
+                    service_id=service_id,
+                    cve_id=vulnerability.cve_id,
+                    confidence=Confidence.HIGH,
+                    cpe=None,
+                    reason=(
+                        f"Nmap script {script_id} confirmed the host vulnerable. "
+                        "This is a tested condition, not a version-based guess; "
+                        "confirm scope and impact before acting on it."
+                    ),
+                    evidence=(evidence,),
+                    access_supported=True,
+                    access_basis=(
+                        f"Nmap script {script_id} confirmed the vulnerability "
+                        "condition on the service"
+                    ),
+                    access_evidence=(evidence,),
+                )
+    return vulnerabilities, matches
+
+
 def check_scan_document(
     document: Any,
     *,
@@ -724,6 +823,40 @@ def check_scan_documents(
                     evidence=(evidence,),
                 )
 
+    # Evidence-backed findings from Nmap vulnerability scripts cover services
+    # that advertise no version (such as Windows SMB), so they are no longer
+    # counted as unmatched gaps in coverage.
+    script_vulnerabilities, script_matches = matches_from_script_documents(documents)
+    for cve_id, vulnerability in script_vulnerabilities.items():
+        vulnerabilities.setdefault(cve_id, vulnerability)
+    for key, match in script_matches.items():
+        matches.setdefault(key, match)
+    script_covered = {match.service_id for match in script_matches.values()}
+    unmatched_services = [
+        service_id for service_id in unmatched_services if service_id not in script_covered
+    ]
+
+    # Landmark CVE candidates derived from each host's OS fingerprint. These are
+    # listed for review from the OS guess; they are not verified coverage and do
+    # not change completion status or form access routes.
+    os_candidates: list[OsCveCandidate] = []
+    seen_candidates: set[tuple[str, str]] = set()
+    for document in documents:
+        for host in document.get("hosts", []) or []:
+            if not isinstance(host, dict):
+                continue
+            address = host.get("address")
+            if not isinstance(address, str):
+                continue
+            for candidate in os_candidates_for_host(
+                address, host.get("cpes"), host.get("os_name")
+            ):
+                key = (candidate.host, candidate.cve_id)
+                if key in seen_candidates:
+                    continue
+                seen_candidates.add(key)
+                os_candidates.append(candidate)
+
     return ScanVulnerabilityResult(
         checks=checks,
         vulnerabilities=tuple(vulnerabilities.values()),
@@ -731,6 +864,7 @@ def check_scan_documents(
         service_count=len(service_cpes),
         unmatched_services=tuple(unmatched_services),
         invalid_cpes=tuple(invalid_cpes.values()),
+        os_candidates=tuple(os_candidates),
     )
 
 

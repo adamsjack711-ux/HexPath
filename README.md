@@ -44,9 +44,11 @@ CVE lookup matches an exact software version against NVD, so a service that
 advertises no version (such as Windows SMB, RPC, and NetBIOS) returns no
 candidates and is reported as incomplete coverage rather than a clean result.
 
-`--smb-vuln` adds Nmap's safe SMB vulnerability checks
-(`smb-vuln-ms17-010` and `smb-vuln-ms08-067`). These are in Nmap's "safe" set:
-they test the vulnerability condition without sending an exploit payload. When a
+`--smb-vuln` runs Nmap's SMB vulnerability-detection scripts
+(`smb-vuln-ms17-010`, `smb-vuln-ms08-067`, `smb-double-pulsar-backdoor` and
+`smb-vuln-cve-2017-7494`). They test the vulnerability condition directly. Some
+are intrusive — `smb-vuln-ms08-067` can crash an unpatched host — so the check
+is opt-in and meant for an authorized lab, not a production network. When a
 check confirms a host vulnerable, HexPath records the mapped CVEs as an
 **evidence-backed** finding: the result carries observed evidence and HIGH
 confidence, counts as covered instead of a gap, and supplies the access evidence

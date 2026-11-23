@@ -79,25 +79,40 @@ _EXPOSURES: tuple[tuple[str, tuple[tuple[str, float, str], ...]], ...] = (
     )),
     ("microsoft:windows_server_2016", (
         ("CVE-2020-0796", 10.0, "SMBv3 remote code execution (SMBGhost)."),
+        ("CVE-2022-26809", 9.8, "Windows RPC runtime remote code execution."),
+        ("CVE-2024-38063", 9.8, "Windows TCP/IP IPv6 remote code execution."),
         ("CVE-2021-34527", 8.8, "Print Spooler remote code execution (PrintNightmare)."),
         ("CVE-2020-1472", 10.0, "Netlogon elevation of privilege on a domain controller (Zerologon)."),
     )),
     ("microsoft:windows_server_2019", (
         ("CVE-2020-0796", 10.0, "SMBv3 remote code execution (SMBGhost)."),
+        ("CVE-2022-26809", 9.8, "Windows RPC runtime remote code execution."),
+        ("CVE-2024-38063", 9.8, "Windows TCP/IP IPv6 remote code execution."),
         ("CVE-2021-34527", 8.8, "Print Spooler remote code execution (PrintNightmare)."),
         ("CVE-2020-1472", 10.0, "Netlogon elevation of privilege on a domain controller (Zerologon)."),
     )),
     ("microsoft:windows_server_2022", (
+        ("CVE-2022-26809", 9.8, "Windows RPC runtime remote code execution."),
+        ("CVE-2024-38063", 9.8, "Windows TCP/IP IPv6 remote code execution."),
         ("CVE-2021-34527", 8.8, "Print Spooler remote code execution (PrintNightmare)."),
         ("CVE-2022-37958", 8.1, "SPNEGO NEGOEX remote code execution."),
     )),
     ("microsoft:windows_10", (
         ("CVE-2020-0796", 10.0, "SMBv3 remote code execution (SMBGhost)."),
+        ("CVE-2022-26809", 9.8, "Windows RPC runtime remote code execution."),
+        ("CVE-2024-38063", 9.8, "Windows TCP/IP IPv6 remote code execution."),
         ("CVE-2021-34527", 8.8, "Print Spooler remote code execution (PrintNightmare)."),
+        ("CVE-2022-30190", 7.8, "MSDT 'Follina' remote code execution via a crafted document."),
+        ("CVE-2023-28252", 7.8, "CLFS driver elevation of privilege (exploited in the wild)."),
+        ("CVE-2021-36934", 7.1, "SAM database disclosure 'HiveNightmare / SeriousSAM'."),
     )),
     ("microsoft:windows_11", (
+        ("CVE-2022-26809", 9.8, "Windows RPC runtime remote code execution."),
+        ("CVE-2024-38063", 9.8, "Windows TCP/IP IPv6 remote code execution."),
         ("CVE-2021-34527", 8.8, "Print Spooler remote code execution (PrintNightmare)."),
         ("CVE-2022-37958", 8.1, "SPNEGO NEGOEX remote code execution."),
+        ("CVE-2022-30190", 7.8, "MSDT 'Follina' remote code execution via a crafted document."),
+        ("CVE-2023-28252", 7.8, "CLFS driver elevation of privilege (exploited in the wild)."),
     )),
 )
 

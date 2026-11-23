@@ -621,6 +621,7 @@ _SCRIPT_CVE_METADATA: dict[str, tuple[float | None, str]] = {
     "CVE-2017-0147": (5.9, "Microsoft SMBv1 information disclosure (MS17-010, EternalRomance family)."),
     "CVE-2017-0148": (8.1, "Microsoft SMBv1 remote code execution (MS17-010, EternalBlue family)."),
     "CVE-2008-4250": (10.0, "Microsoft Server service RPC remote code execution (MS08-067)."),
+    "CVE-2017-7494": (9.8, "Samba remote code execution via writable share (SambaCry)."),
 }
 
 

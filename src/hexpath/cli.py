@@ -89,8 +89,9 @@ def build_parser() -> argparse.ArgumentParser:
     assess.add_argument("--json", action="store_true", help="print JSON instead of terminal summary")
     assess.add_argument(
         "--smb-vuln", dest="smb_vuln", action="store_true",
-        help="run Nmap's safe SMB vulnerability checks (ms17-010, ms08-067) on live "
-        "targets for evidence-backed CVEs on services with no version",
+        help="run Nmap's SMB vulnerability-detection scripts (ms17-010, ms08-067, "
+        "DoublePulsar, SambaCry) on live targets for evidence-backed CVEs on "
+        "services with no version; opt-in, for authorized labs",
     )
     assess.add_argument("targets", nargs="*", help="explicit IPv6 hosts to scan; omit for saved scans")
 

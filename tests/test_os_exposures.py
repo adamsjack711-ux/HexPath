@@ -23,6 +23,18 @@ class OsExposureTests(unittest.TestCase):
         ids = {candidate.cve_id for candidate in candidates}
         self.assertIn("CVE-2020-0796", ids)
         self.assertIn("CVE-2021-34527", ids)
+        # expanded coverage
+        self.assertIn("CVE-2022-26809", ids)
+        self.assertIn("CVE-2024-38063", ids)
+        self.assertIn("CVE-2021-36934", ids)
+
+    def test_windows_11_lists_modern_cves(self) -> None:
+        candidates = os_candidates_for_host(
+            "10.0.0.11", ["cpe:/o:microsoft:windows_11"]
+        )
+        ids = {candidate.cve_id for candidate in candidates}
+        self.assertIn("CVE-2022-26809", ids)
+        self.assertIn("CVE-2022-30190", ids)
 
     def test_candidates_are_sorted_by_severity(self) -> None:
         candidates = os_candidates_for_host(

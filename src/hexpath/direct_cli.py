@@ -36,8 +36,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-p", "--ports", help="ports or ranges, e.g. 22,80,443 or 1-1000; '-' means all TCP ports")
     parser.add_argument(
         "--smb-vuln", dest="smb_vuln", action="store_true",
-        help="run Nmap's safe SMB vulnerability checks (ms17-010, ms08-067) for "
-        "evidence-backed CVEs on services with no version, such as Windows SMB",
+        help="run Nmap's SMB vulnerability-detection scripts (ms17-010, ms08-067, "
+        "DoublePulsar, SambaCry) for evidence-backed CVEs on services with no "
+        "version, such as Windows SMB; opt-in, for authorized labs",
     )
     parser.add_argument(
         "--exclude", dest="exclude", action="append", default=[], metavar="ADDR",

@@ -30,10 +30,17 @@ from hexpath.scope import Scope, ScopeError
 
 IPAddress = IPv4Address | IPv6Address
 
-# Nmap NSE scripts run by the opt-in SMB vulnerability check. Both are in
-# Nmap's "safe" set: they probe the SMB vulnerability condition without sending
-# an exploit payload, so they are appropriate for an authorized lab scan.
-SMB_VULN_SCRIPTS = ("smb-vuln-ms17-010", "smb-vuln-ms08-067")
+# Nmap NSE vulnerability-detection scripts run by the opt-in SMB check. They
+# test the vulnerability condition directly, which is what lets HexPath report an
+# evidence-backed finding for a service that advertises no version. Some are
+# intrusive (ms08-067 in particular can crash an unpatched host), so this check
+# is opt-in and intended for an authorized lab, not a production network.
+SMB_VULN_SCRIPTS = (
+    "smb-vuln-ms17-010",
+    "smb-vuln-ms08-067",
+    "smb-double-pulsar-backdoor",
+    "smb-vuln-cve-2017-7494",
+)
 
 # CVE identifiers used when a script confirms a host vulnerable but its
 # structured output does not enumerate them explicitly.
@@ -47,6 +54,10 @@ _SCRIPT_FALLBACK_CVES: dict[str, tuple[str, ...]] = {
         "CVE-2017-0148",
     ),
     "smb-vuln-ms08-067": ("CVE-2008-4250",),
+    # DoublePulsar is the implant commonly dropped through the MS17-010 flaw; a
+    # detected backdoor maps back to the same vulnerability family.
+    "smb-double-pulsar-backdoor": ("CVE-2017-0144",),
+    "smb-vuln-cve-2017-7494": ("CVE-2017-7494",),
 }
 
 _CVE_TOKEN = re.compile(r"CVE-\d{4}-\d{4,}", re.IGNORECASE)

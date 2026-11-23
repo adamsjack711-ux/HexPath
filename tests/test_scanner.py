@@ -546,9 +546,10 @@ class SmbVulnScriptTests(unittest.TestCase):
         )
         self.assertIn("--script", command.arguments)
         script_argument = command.arguments[command.arguments.index("--script") + 1]
-        self.assertEqual(
-            script_argument, "smb-vuln-ms17-010,smb-vuln-ms08-067"
-        )
+        names = script_argument.split(",")
+        self.assertIn("smb-vuln-ms17-010", names)
+        self.assertIn("smb-vuln-ms08-067", names)
+        self.assertIn("smb-double-pulsar-backdoor", names)
 
     def test_vuln_scripts_omitted_by_default(self) -> None:
         command = build_nmap_command(

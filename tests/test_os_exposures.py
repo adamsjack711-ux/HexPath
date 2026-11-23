@@ -47,6 +47,30 @@ class OsExposureTests(unittest.TestCase):
         candidates = os_candidates_for_host("10.0.0.5", ["cpe:/o:microsoft:windows_8.1"])
         self.assertTrue(candidates)
 
+    def test_name_fallback_when_no_cpe(self) -> None:
+        # Nmap named the OS but gave no CPE — candidates still appear.
+        candidates = os_candidates_for_host(
+            "192.168.56.107", [], "Microsoft Windows 10 1803"
+        )
+        ids = {c.cve_id for c in candidates}
+        self.assertIn("CVE-2020-0796", ids)
+        self.assertTrue(all("name:" in c.basis for c in candidates))
+
+    def test_name_fallback_embedded_standard_7(self) -> None:
+        candidates = os_candidates_for_host(
+            "192.168.56.111", None, "Microsoft Windows Embedded Standard 7"
+        )
+        ids = {c.cve_id for c in candidates}
+        self.assertIn("CVE-2017-0143", ids)
+
+    def test_cpe_takes_precedence_over_name(self) -> None:
+        candidates = os_candidates_for_host(
+            "10.0.0.5", ["cpe:/o:microsoft:windows_11"], "Microsoft Windows 10"
+        )
+        self.assertTrue(all("fingerprint cpe" not in c.basis.lower() or "name:" not in c.basis for c in candidates))
+        # Win11-specific CVE present, proving the CPE (not the name) was used.
+        self.assertIn("CVE-2022-37958", {c.cve_id for c in candidates})
+
     def test_non_windows_cpe_yields_no_candidates(self) -> None:
         self.assertEqual(
             os_candidates_for_host("10.0.0.9", ["cpe:/o:linux:linux_kernel"]), []

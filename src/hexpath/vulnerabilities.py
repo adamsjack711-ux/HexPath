@@ -841,7 +841,9 @@ def check_scan_documents(
             address = host.get("address")
             if not isinstance(address, str):
                 continue
-            for candidate in os_candidates_for_host(address, host.get("cpes")):
+            for candidate in os_candidates_for_host(
+                address, host.get("cpes"), host.get("os_name")
+            ):
                 key = (candidate.host, candidate.cve_id)
                 if key in seen_candidates:
                     continue

@@ -125,32 +125,75 @@ def _match_exposures(cpe: str) -> tuple[tuple[str, float, str], ...] | None:
     return None
 
 
-def os_candidates_for_host(host: str, cpes: Any) -> list[OsCveCandidate]:
-    """Return landmark CVE candidates for a host's OS fingerprint CPEs.
+# Map a human-readable OS name (Nmap's osmatch) to an _EXPOSURES token, so a
+# host that Nmap names ("Microsoft Windows 10 1803") but gives no CPE for still
+# gets candidates. Checked most specific first so "8.1" beats "8", a server
+# build beats the bare version, and "Embedded Standard 7" maps to Windows 7.
+_NAME_TOKENS: tuple[tuple[str, str], ...] = (
+    ("server 2003", "microsoft:windows_server_2003"),
+    ("server 2008", "microsoft:windows_server_2008"),
+    ("server 2012", "microsoft:windows_server_2012"),
+    ("server 2016", "microsoft:windows_server_2016"),
+    ("server 2019", "microsoft:windows_server_2019"),
+    ("server 2022", "microsoft:windows_server_2022"),
+    ("windows xp", "microsoft:windows_xp"),
+    ("vista", "microsoft:windows_vista"),
+    ("embedded standard 7", "microsoft:windows_7"),
+    ("windows 7", "microsoft:windows_7"),
+    ("windows 8.1", "microsoft:windows_8.1"),
+    ("windows 8", "microsoft:windows_8"),
+    ("windows 10", "microsoft:windows_10"),
+    ("windows 11", "microsoft:windows_11"),
+)
 
-    Candidates are de-duplicated by CVE id, so a host that reports several OS
-    CPEs does not list the same CVE twice.
+
+def _match_exposures_by_name(os_name: str) -> tuple[tuple[str, float, str], ...] | None:
+    lowered = os_name.lower()
+    for fragment, token in _NAME_TOKENS:
+        if fragment in lowered:
+            for exposure_token, exposures in _EXPOSURES:
+                if exposure_token == token:
+                    return exposures
+    return None
+
+
+def os_candidates_for_host(
+    host: str, cpes: Any, os_name: Any = None
+) -> list[OsCveCandidate]:
+    """Return landmark CVE candidates for a host's OS fingerprint.
+
+    Candidates come from the OS CPEs when Nmap provides them. When it does not
+    (a name-only fingerprint, which happens often), the host's OS name is used as
+    a fallback so an identified Windows host still produces candidates. Results
+    are de-duplicated by CVE id.
     """
-    if not isinstance(cpes, (list, tuple)):
-        return []
     candidates: dict[str, OsCveCandidate] = {}
-    for cpe in cpes:
-        if not isinstance(cpe, str):
-            continue
-        exposures = _match_exposures(cpe)
-        if exposures is None:
-            continue
-        for cve_id, cvss, description in exposures:
-            candidates.setdefault(
-                cve_id,
-                OsCveCandidate(
-                    host=host,
-                    cve_id=cve_id,
-                    cvss_score=cvss,
-                    description=description,
-                    basis=f"OS fingerprint {cpe}",
-                ),
-            )
+    if isinstance(cpes, (list, tuple)):
+        for cpe in cpes:
+            if not isinstance(cpe, str):
+                continue
+            exposures = _match_exposures(cpe)
+            if exposures is None:
+                continue
+            for cve_id, cvss, description in exposures:
+                candidates.setdefault(
+                    cve_id,
+                    OsCveCandidate(host=host, cve_id=cve_id, cvss_score=cvss,
+                                   description=description, basis=f"OS fingerprint {cpe}"),
+                )
+
+    # Fallback: no CPE matched, but Nmap named the OS.
+    if not candidates and isinstance(os_name, str) and os_name.strip():
+        exposures = _match_exposures_by_name(os_name)
+        if exposures is not None:
+            for cve_id, cvss, description in exposures:
+                candidates.setdefault(
+                    cve_id,
+                    OsCveCandidate(host=host, cve_id=cve_id, cvss_score=cvss,
+                                   description=description,
+                                   basis=f"OS fingerprint name: {os_name}"),
+                )
+
     return sorted(
         candidates.values(),
         key=lambda item: (-(item.cvss_score or 0.0), item.cve_id),

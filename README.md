@@ -32,6 +32,7 @@ hexpath 192.0.2.10 -p 22,80,443        # selected ports
 hexpath 192.0.2.10 -p-                 # versions and CVE lookup on all TCP ports
 hexpath 192.0.2.10 -Pn                # target is online but discovery fails
 hexpath 192.0.2.10 --smb-vuln         # confirm SMB vulnerabilities (ms17-010, ms08-067)
+hexpath 192.0.2.0/24 --exclude 192.0.2.5   # sweep a network but skip your own scanner
 hexpath 2001:db8::10 -o scan.json     # save the scan and CVE candidates as JSON
 hexpath lab.example --plan           # resolve and preview, without scanning
 hexpath path                          # compile the latest scan into candidate paths

@@ -39,6 +39,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="run Nmap's safe SMB vulnerability checks (ms17-010, ms08-067) for "
         "evidence-backed CVEs on services with no version, such as Windows SMB",
     )
+    parser.add_argument(
+        "--exclude", dest="exclude", action="append", default=[], metavar="ADDR",
+        help="IP or CIDR to leave out of the scan (e.g. your own scanner); repeatable "
+        "or comma-separated",
+    )
     parser.add_argument("-Pn", dest="skip_discovery", action="store_true", help="skip host discovery")
     family = parser.add_mutually_exclusive_group()
     family.add_argument("-4", dest="ip_version", action="store_const", const=4, help="use IPv4")
@@ -73,6 +78,17 @@ def resolve_targets(targets: list[str], version: int | None) -> list[str]:
             raise ValueError(f"no usable address for {target}")
         resolved.append(str(ip_network(addresses[0], strict=True)))
     return list(dict.fromkeys(resolved))
+
+
+def _split_exclude(values: list[str]) -> tuple[str, ...]:
+    """Flatten repeated and comma-separated --exclude values into a tuple."""
+    result: list[str] = []
+    for value in values or []:
+        for part in value.split(","):
+            part = part.strip()
+            if part and part not in result:
+                result.append(part)
+    return tuple(result)
 
 
 def render_result(document: dict) -> str:
@@ -151,6 +167,7 @@ def main(argv: list[str]) -> int:
             scope, targets, profile, skip_discovery=args.skip_discovery,
             ports="1-65535" if args.ports == "-" else args.ports, ip_version=args.ip_version,
             vuln_scripts=args.smb_vuln,
+            exclude=_split_exclude(args.exclude),
         )
         if args.os_detection:
             command = replace(command, arguments=(command.arguments[0], "-O", *command.arguments[1:]))

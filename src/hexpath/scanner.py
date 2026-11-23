@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
-from ipaddress import IPv4Address, IPv6Address, ip_address
+from ipaddress import IPv4Address, IPv6Address, ip_address, ip_network
 import json
 import os
 from pathlib import Path
@@ -201,6 +201,7 @@ def build_nmap_command(
     ip_version: int | None = None,
     os_detection: bool = False,
     vuln_scripts: bool = False,
+    exclude: tuple[str, ...] = (),
 ) -> NmapCommand:
     """Validate targets against scope and construct a conservative command."""
     if not targets:
@@ -265,6 +266,14 @@ def build_nmap_command(
         ("--script", ",".join(SMB_VULN_SCRIPTS)) if vuln_scripts else ()
     )
 
+    exclude_arguments: tuple[str, ...] = ()
+    cleaned_exclude = [entry.strip() for entry in exclude if entry.strip()]
+    for entry in cleaned_exclude:
+        if not _is_valid_exclude_target(entry):
+            raise ScannerError(f"invalid exclude target: {entry!r}")
+    if cleaned_exclude:
+        exclude_arguments = ("--exclude", ",".join(cleaned_exclude))
+
     return NmapCommand(
         arguments=(
             common_arguments
@@ -272,6 +281,7 @@ def build_nmap_command(
             + port_arguments
             + os_arguments
             + script_arguments
+            + exclude_arguments
             + profile_arguments
             + authorized_targets
         ),
@@ -279,6 +289,20 @@ def build_nmap_command(
         profile=selected_profile,
         ip_version=selected_version,
     )
+
+
+def _is_valid_exclude_target(value: str) -> bool:
+    """Accept a single IP address or a CIDR network to exclude from a scan."""
+    try:
+        ip_address(value)
+        return True
+    except ValueError:
+        pass
+    try:
+        ip_network(value, strict=False)
+        return True
+    except ValueError:
+        return False
 
 
 def _validate_ports(value: str) -> str:

@@ -231,6 +231,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="add Nmap OS detection (-O); needs elevated privileges to run",
     )
+    plan_parser.add_argument(
+        "--exclude", dest="exclude", action="append", default=[], metavar="ADDR",
+        help="IP or CIDR to leave out of the scan; repeatable or comma-separated",
+    )
     plan_family = plan_parser.add_mutually_exclusive_group()
     plan_family.add_argument(
         "-4",
@@ -326,6 +330,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--vantage",
         default=ENTRY_NODE_ID,
         help="entry:scanner or the authorized host:<IP> running this scan",
+    )
+    run_parser.add_argument(
+        "--exclude", dest="exclude", action="append", default=[], metavar="ADDR",
+        help="IP or CIDR to leave out of the scan; repeatable or comma-separated",
     )
     run_parser.add_argument("targets", nargs="+", help="authorized IP addresses or CIDRs")
 
@@ -654,6 +662,17 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _split_exclude(values: Sequence[str]) -> tuple[str, ...]:
+    """Flatten repeated and comma-separated --exclude values into a tuple."""
+    result: list[str] = []
+    for value in values or []:
+        for part in value.split(","):
+            part = part.strip()
+            if part and part not in result:
+                result.append(part)
+    return tuple(result)
+
+
 def _scan_profile(value: str) -> str:
     return {
         "d": ScanProfile.DISCOVERY.value,
@@ -838,6 +857,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ports=args.ports,
                 ip_version=args.ip_version,
                 os_detection=args.os_detection,
+                exclude=_split_exclude(args.exclude),
             )
             print(shlex.join(command.arguments))
             return 0
@@ -852,6 +872,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ports=args.ports,
                 ip_version=args.ip_version,
                 os_detection=args.os_detection,
+                exclude=_split_exclude(args.exclude),
             )
             xml_output = run_nmap(command, timeout_seconds=args.timeout)
             result = parse_nmap_xml(

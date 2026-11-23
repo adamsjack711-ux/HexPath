@@ -74,6 +74,14 @@ class DirectCliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertNotIn("--script", output)
 
+    def test_exclude_flattens_repeated_and_comma_values(self):
+        code, output, _ = self.call([
+            "192.168.56.0/24", "--exclude", "192.168.56.103,192.168.56.1",
+            "--exclude", "192.168.56.5", "--plan",
+        ])
+        self.assertEqual(code, 0)
+        self.assertIn("--exclude 192.168.56.103,192.168.56.1,192.168.56.5", output)
+
     def test_no_cves_can_keep_explicit_version_probes(self):
         for version_flags, detect_versions in (([], False), (["-sV"], True)):
             with self.subTest(version_flags=version_flags):

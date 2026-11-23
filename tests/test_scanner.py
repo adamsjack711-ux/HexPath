@@ -483,6 +483,53 @@ class NmapXmlParserTests(unittest.TestCase):
             parse_nmap_xml("<report/>")
 
 
+class ExcludeTargetTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.scope = Scope.from_dict(
+            {"name": "lab", "targets": ["192.168.56.0/24"]}
+        )
+
+    def test_exclude_adds_nmap_exclude_argument(self) -> None:
+        command = build_nmap_command(
+            self.scope, ["192.168.56.0/24"], ScanProfile.SERVICES,
+            exclude=("192.168.56.103", "192.168.56.1"),
+        )
+        self.assertIn("--exclude", command.arguments)
+        value = command.arguments[command.arguments.index("--exclude") + 1]
+        self.assertEqual(value, "192.168.56.103,192.168.56.1")
+        # The exclude list precedes the scan targets.
+        self.assertLess(
+            command.arguments.index("--exclude"),
+            command.arguments.index("192.168.56.0/24"),
+        )
+
+    def test_no_exclude_argument_by_default(self) -> None:
+        command = build_nmap_command(
+            self.scope, ["192.168.56.0/24"], ScanProfile.SERVICES
+        )
+        self.assertNotIn("--exclude", command.arguments)
+
+    def test_blank_exclude_entries_are_ignored(self) -> None:
+        command = build_nmap_command(
+            self.scope, ["192.168.56.0/24"], ScanProfile.SERVICES, exclude=("", "  "),
+        )
+        self.assertNotIn("--exclude", command.arguments)
+
+    def test_invalid_exclude_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ScannerError, "invalid exclude target"):
+            build_nmap_command(
+                self.scope, ["192.168.56.0/24"], ScanProfile.SERVICES,
+                exclude=("not-an-ip",),
+            )
+
+    def test_cidr_exclude_is_accepted(self) -> None:
+        command = build_nmap_command(
+            self.scope, ["192.168.56.0/24"], ScanProfile.SERVICES,
+            exclude=("192.168.56.100/30",),
+        )
+        self.assertIn("192.168.56.100/30", command.arguments)
+
+
 class SmbVulnScriptTests(unittest.TestCase):
     def setUp(self) -> None:
         self.scope = Scope.from_dict(

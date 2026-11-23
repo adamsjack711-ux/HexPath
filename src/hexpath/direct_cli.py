@@ -36,7 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-p", "--ports", help="ports or ranges, e.g. 22,80,443 or 1-1000; '-' means all TCP ports")
     parser.add_argument(
         "--smb-vuln", dest="smb_vuln", action="store_true",
-        help="run Nmap's safe SMB vulnerability checks (ms17-010, ms08-067) for "
+        help="run the Nmap MS17-010 exposure check for "
         "evidence-backed CVEs on services with no version, such as Windows SMB",
     )
     parser.add_argument("-Pn", dest="skip_discovery", action="store_true", help="skip host discovery")
@@ -103,8 +103,11 @@ def render_result(document: dict) -> str:
         lines.append("Confirmed by Nmap vulnerability scripts (evidence-backed):")
         for finding in confirmed:
             cve_ids = ", ".join(finding.get("cve_ids", [])) or "no CVE id reported"
+            location = f"[{finding['host']}]"
+            if finding.get("port") is not None:
+                location += f" {finding['port']}/{finding['protocol']}"
             lines.append(
-                f"  [{finding['host']}] {finding['port']}/{finding['protocol']} "
+                f"  {location} "
                 f"{finding['script_id']}: {finding['state']} — {cve_ids}"
             )
         lines.append("")

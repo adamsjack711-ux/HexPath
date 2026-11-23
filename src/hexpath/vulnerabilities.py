@@ -628,7 +628,7 @@ def matches_from_script_documents(
     CVE matches.
 
     A confirmed finding is an observed condition rather than a version guess, so
-    the resulting matches carry observed access evidence and HIGH confidence.
+    the resulting matches carry observed exposure evidence and HIGH confidence.
     """
     vulnerabilities: dict[str, Vulnerability] = {}
     matches: dict[tuple[str, str], VulnerabilityMatch] = {}
@@ -684,12 +684,6 @@ def matches_from_script_documents(
                         "confirm scope and impact before acting on it."
                     ),
                     evidence=(evidence,),
-                    access_supported=True,
-                    access_basis=(
-                        f"Nmap script {script_id} confirmed the vulnerability "
-                        "condition on the service"
-                    ),
-                    access_evidence=(evidence,),
                 )
     return vulnerabilities, matches
 

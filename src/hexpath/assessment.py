@@ -7,7 +7,7 @@ import ipaddress
 from typing import Any
 
 from hexpath.graph import ENTRY_NODE_ID, build_attack_graph
-from hexpath.models import Evidence, EvidenceLevel, Host
+from hexpath.models import normalize_saved_access_evidence, Evidence, EvidenceLevel, Host
 from hexpath.scanner import require_authorized_vantage
 from hexpath.scope import Scope
 from hexpath.vulnerabilities import CpeIdentity, VulnerabilityError
@@ -57,6 +57,7 @@ def summarize_assessment(
     """Keep observed exposure separate from hypothetical compromise transitions."""
     if not isinstance(cves, dict):
         raise ValueError("CVE results must be an object")
+    cves = normalize_saved_access_evidence(cves)
     coverage = cves.get("coverage", {})
     checks = cves.get("checks", [])
     if not isinstance(coverage, dict) or not isinstance(checks, list) or any(
@@ -334,6 +335,13 @@ def render_assessment(document: dict[str, Any]) -> str:
         f"  CVE links excluded from routes: {document['excluded_match_count']}",
         "", "TARGET EXPOSURE",
     ]
+    for scan in document.get("scans", []):
+        for finding in scan.get("script_findings", []):
+            if (isinstance(finding, dict) and finding.get("host") == target_address
+                    and finding.get("confirms_vulnerable") is True):
+                ids = ", ".join(str(cve) for cve in finding.get("cve_ids", []))
+                lines.append(f"  {finding.get('script_id')} reported exposure"
+                             + (f" ({ids})" if ids else ""))
     for item in target_services:
         lines.append(
             f"  {item['vantage']} -> [{item['host']}]:{item.get('port')}"

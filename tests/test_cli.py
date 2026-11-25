@@ -256,6 +256,16 @@ class PathCliTests(unittest.TestCase):
             report["recommended_path"]["metasploit_modules"][0]["fullname"],
             "exploit/linux/ssh/example",
         )
+        steps = report["recommended_path"]["steps"]
+        self.assertEqual(report["recommended_path"]["metasploit_search"], "search cve:2024-6387")
+        self.assertEqual(
+            next(step for step in steps if step["action"] == "search_metasploit")["commands"],
+            ["msfconsole -q", "search cve:2024-6387"],
+        )
+        self.assertIn(
+            "use exploit/linux/ssh/example",
+            next(step for step in steps if step["action"] == "inspect_metasploit_module")["commands"],
+        )
         self.assertFalse(report["recommended_path"]["access_evidence_recorded"])
 
         output = StringIO()
@@ -263,6 +273,10 @@ class PathCliTests(unittest.TestCase):
             exit_code = main(["path", "--metasploit-db", str(metadata)])
         self.assertEqual(exit_code, 0)
         self.assertIn("Metasploit module: exploit/linux/ssh/example", output.getvalue())
+        self.assertIn("Investigation steps:", output.getvalue())
+        self.assertIn("Metasploit search (paste into msfconsole): search cve:2024-6387", output.getvalue())
+        self.assertIn("search cve:2024-6387", output.getvalue())
+        self.assertIn("set RHOSTS 192.0.2.10", output.getvalue())
 
     def test_path_keeps_working_without_installed_metasploit(self) -> None:
         save_latest_scan({**self.scan, "cves": self.cves})
@@ -273,6 +287,10 @@ class PathCliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertFalse(report["metasploit"]["available"])
         self.assertEqual(report["recommended_path"]["metasploit_modules"], [])
+        self.assertIn(
+            "search cve:2024-6387",
+            next(step for step in report["recommended_path"]["steps"] if step["action"] == "search_metasploit")["commands"],
+        )
 
     def test_path_sanitizes_scan_and_cve_text_for_the_terminal(self) -> None:
         self.scan["services"][0]["product"] = "OpenSSH\x1b[2J\nFAKE PATH"

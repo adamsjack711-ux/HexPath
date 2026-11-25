@@ -88,6 +88,11 @@ or change the path ranking. The JSON report records whether module metadata was
 available and includes all matching module names, types, and ranks per lead.
 Without a local Framework installation, path analysis still works and reports
 that module metadata is unavailable.
+Each lead also includes numbered investigation steps and the exact command to
+paste into `msfconsole`, such as `search cve:2017-0144`. When a matching module
+is present, the steps show how to inspect its options, configure the target if
+those options exist, and record the result of an approved test. JSON output
+contains the same steps and commands.
 
 For a pre-authorized network behind an SSH jump server, place
 `jump-profile.json` beside the saved state file (the directory selected by

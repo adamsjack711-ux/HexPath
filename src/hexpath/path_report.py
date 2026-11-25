@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from hexpath.graph import GraphError, build_attack_graph, vulnerability_cost
@@ -96,6 +97,7 @@ def compile_path_report(
                 )
             except (GraphError, TypeError, ValueError) as error:
                 raise ValueError(f"invalid CVE match for {cve_id}: {error}") from error
+            modules = metasploit_modules.get(cve_id.upper(), []) if metasploit_modules is not None else []
             paths.append({
                 "target": {
                     "host": host,
@@ -120,35 +122,12 @@ def compile_path_report(
                     "reason": match.get("reason"),
                     "references": vulnerability.get("references", []),
                 },
-                "metasploit_modules": (
-                    metasploit_modules.get(cve_id.upper(), []) if metasploit_modules is not None else []
-                ),
+                "metasploit_modules": modules,
+                "metasploit_search": _metasploit_search_command(cve_id),
                 "priority_cost": priority_cost,
                 "access_evidence_recorded": match.get("access_supported") is True,
                 "evidence": match.get("evidence", []),
-                "steps": [
-                    {
-                        "action": "reach_service",
-                        "detail": (
-                            f"Connect to {host}:{service.get('port')}/"
-                            f"{service.get('protocol')} ({service.get('state')})."
-                        ),
-                    },
-                    {
-                        "action": "validate_candidate",
-                        "detail": (
-                            f"Confirm {cve_id} applies to the detected product, version, "
-                            "configuration, and patch state."
-                        ),
-                    },
-                    {
-                        "action": "authorized_test",
-                        "detail": (
-                            f"Use an approved test for {cve_id} and record whether it "
-                            "produces the expected access."
-                        ),
-                    },
-                ],
+                "steps": _investigation_steps(service, cve_id, modules),
             })
 
     paths.sort(key=_path_sort_key)
@@ -288,12 +267,9 @@ def render_path_report(document: dict[str, Any]) -> str:
                 f"Lead {path['rank']}: {path['source']} -> "
                 f"{endpoint['host']}:{endpoint['port']}/{endpoint['protocol']}"
             ),
-            f"  1. Port {endpoint['port']}/{endpoint['protocol']} is {endpoint['state']}",
-            f"     Service: {_service_identity(path['service'])}",
-            f"  2. {finding['cve_id']} | {score_label} | confidence {finding['confidence']}",
-            f"     {finding.get('reason') or 'No match reason supplied.'}",
-            f"  3. Validate the affected version, configuration, and patch state.",
-            f"  4. Run an approved test for {finding['cve_id']} and record the access result.",
+            f"  Service: {endpoint['port']}/{endpoint['protocol']} {endpoint['state']} | {_service_identity(path['service'])}",
+            f"  Finding: {finding['cve_id']} | {score_label} | confidence {finding['confidence']}",
+            f"  Reason: {finding.get('reason') or 'No match reason supplied.'}",
             f"  Priority cost: {path['priority_cost']:.2f}",
         ]
         if finding.get("cvss_vector"):
@@ -304,14 +280,85 @@ def render_path_report(document: dict[str, Any]) -> str:
         if isinstance(references, list) and references:
             candidate_lines.append(f"  Reference: {references[0]}")
         modules = path["metasploit_modules"]
+        if path["metasploit_search"]:
+            candidate_lines.append(
+                f"  Metasploit search (paste into msfconsole): {path['metasploit_search']}"
+            )
         for module in modules[:3]:
             candidate_lines.append(
                 f"  Metasploit module: {module['fullname']} ({module['type'] or 'unknown type'})"
             )
         if len(modules) > 3:
             candidate_lines.append(f"  ... {len(modules) - 3} more modules in JSON")
+        candidate_lines.append("  Investigation steps:")
+        for number, step in enumerate(path["steps"], 1):
+            candidate_lines.append(f"    {number}. {step['detail']}")
+            for command in step.get("commands", []):
+                candidate_lines.append(f"       {command}")
         lines.extend(candidate_lines)
     return _render_lines(lines)
+
+
+def _investigation_steps(
+    service: dict[str, Any], cve_id: str, modules: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Give operators an ordered workflow without treating module matches as access."""
+    host = service["host"]
+    port = service.get("port")
+    protocol = service.get("protocol")
+    steps: list[dict[str, Any]] = [
+        {
+            "action": "reach_service",
+            "detail": f"Confirm {host}:{port}/{protocol} is reachable and identify the running service.",
+        },
+        {
+            "action": "validate_candidate",
+            "detail": f"Confirm {cve_id} applies to this product, version, configuration, and patch state.",
+        },
+    ]
+    search = _metasploit_search_command(cve_id)
+    if search:
+        steps.append({
+            "action": "search_metasploit",
+            "detail": f"Open Metasploit and paste this exact search for {cve_id}.",
+            "commands": ["msfconsole -q", search],
+        })
+    if modules:
+        module = next((item for item in modules if item.get("type") == "exploit"), modules[0])
+        steps.append({
+            "action": "inspect_metasploit_module",
+            "detail": f"Inspect {module['fullname']} and its required options; the CVE reference alone is not proof of applicability.",
+            "commands": [f"use {module['fullname']}", "info", "show options"],
+        })
+        if module.get("type") != "post":
+            steps.append({
+                "action": "configure_metasploit_target",
+                "detail": "If these options exist, set the target host and port; review all other required options before testing.",
+                "commands": [f"set RHOSTS {host}", f"set RPORT {port}"],
+            })
+            steps.append({
+                "action": "check_candidate",
+                "detail": "If the module supports check, run it within the approved scope and review the result.",
+                "commands": ["check"],
+            })
+    steps.extend([
+        {
+            "action": "authorized_test",
+            "detail": f"Run an approved test for {cve_id} only after confirming scope and module settings; save the output.",
+            **({"commands": ["run"]} if modules else {}),
+        },
+        {
+            "action": "record_result",
+            "detail": "Record whether access actually occurred. Only observed access can support a host route.",
+        },
+    ])
+    return steps
+
+
+def _metasploit_search_command(cve_id: str) -> str | None:
+    if re.fullmatch(r"CVE-\d{4}-\d{4,}", cve_id, re.IGNORECASE):
+        return f"search cve:{cve_id.upper().removeprefix('CVE-')}"
+    return None
 
 
 def _service_summary(service: dict[str, Any]) -> dict[str, Any]:

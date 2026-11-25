@@ -776,7 +776,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.output:
                 Path(args.output).write_text(serialized + "\n", encoding="utf-8")
             print(serialized if args.json else render_path_report(report))
-            return 0 if report["candidate_paths"] else 1
+            return 0 if report["candidate_paths"] or report["metasploit_service_leads"] else 1
         if args.command == "assess":
             scope = Scope.from_json_file(args.scope)
             # The objective's address family decides whether this is an IPv4 or

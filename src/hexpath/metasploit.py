@@ -65,12 +65,46 @@ def load_module_index(path: Path) -> dict[str, list[dict[str, Any]]]:
             "name": item.get("name") if isinstance(item.get("name"), str) else fullname,
             "type": item.get("type") if isinstance(item.get("type"), str) else None,
             "rank": item.get("rank") if isinstance(item.get("rank"), int) else None,
+            "rport": item.get("rport") if isinstance(item.get("rport"), int) else None,
         }
-        for cve in {
+        cves = {
             reference.upper() for reference in references
             if isinstance(reference, str) and _CVE.fullmatch(reference)
-        }:
+        }
+        module["cve_ids"] = sorted(cves)
+        for cve in cves:
             index[cve].append(module)
     for modules in index.values():
         modules.sort(key=lambda module: (-(module["rank"] or 0), module["fullname"]))
     return dict(index)
+
+
+def match_service_modules(
+    service: dict[str, Any], index: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Find module titles with an exact observed product/version and port match.
+
+    This is a lead for manual review, not a CVE applicability finding.
+    """
+    product = service.get("product")
+    raw_version = service.get("version")
+    port = service.get("port")
+    if not isinstance(product, str) or not isinstance(raw_version, str) or not isinstance(port, int):
+        return []
+    if " - " in raw_version or "X" in raw_version.upper():
+        return []
+    version_match = re.match(r"\d+(?:\.\d+)+(?:[a-z]\d*)?", raw_version, re.IGNORECASE)
+    if version_match is None:
+        return []
+    version = version_match.group()
+    version_pattern = re.compile(rf"(?<![0-9.]){re.escape(version)}(?![0-9A-Za-z.])", re.IGNORECASE)
+    product_name = product.casefold().strip()
+    matches: dict[str, dict[str, Any]] = {}
+    for modules in index.values():
+        for module in modules:
+            name = module["name"]
+            if module["fullname"] in matches or module["rport"] != port:
+                continue
+            if product_name in name.casefold() and version_pattern.search(name):
+                matches[module["fullname"]] = module
+    return sorted(matches.values(), key=lambda module: (-(module["rank"] or 0), module["fullname"]))

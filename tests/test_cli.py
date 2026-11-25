@@ -292,6 +292,54 @@ class PathCliTests(unittest.TestCase):
             next(step for step in report["recommended_path"]["steps"] if step["action"] == "search_metasploit")["commands"],
         )
 
+    def test_path_shows_exact_msf_module_path_when_nvd_is_unavailable(self) -> None:
+        scan = json.loads(json.dumps(self.scan))
+        scan["services"][0].update({
+            "port": 21, "name": "ftp", "product": "vsftpd", "version": "2.3.4",
+            "cpes": ["cpe:/a:vsftpd:vsftpd:2.3.4"],
+        })
+        scan["cves"] = {
+            "completed": False, "coverage": {"cpe_checks": 1, "completed_cpe_checks": 0},
+            "checks": [{"error": "NVD request failed: DNS unavailable"}],
+            "vulnerabilities": [], "matches": [],
+        }
+        save_latest_scan(scan)
+        metadata = Path(self.temporary_directory.name) / "modules_metadata_base.json"
+        metadata.write_text(json.dumps({
+            "exploit/unix/ftp/vsftpd_234_backdoor": {
+                "fullname": "exploit/unix/ftp/vsftpd_234_backdoor",
+                "name": "VSFTPD 2.3.4 Backdoor Command Execution",
+                "type": "exploit", "rank": 600, "rport": 21,
+                "references": ["CVE-2011-2523"],
+            },
+            "exploit/unix/ftp/vsftpd_232": {
+                "fullname": "exploit/unix/ftp/vsftpd_232",
+                "name": "VSFTPD 2.3.2 Command Execution",
+                "type": "exploit", "rank": 600, "rport": 21,
+                "references": ["CVE-2011-9999"],
+            },
+        }), encoding="utf-8")
+        output = StringIO()
+        with redirect_stdout(output):
+            exit_code = main(["path", "--metasploit-db", str(metadata)])
+        rendered = output.getvalue()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("CVE lookup issue: NVD request failed: DNS unavailable", rendered)
+        self.assertIn("Paste into msfconsole: use exploit/unix/ftp/vsftpd_234_backdoor", rendered)
+        self.assertNotIn("use exploit/unix/ftp/vsftpd_232", rendered)
+        self.assertNotIn("Run a service-version scan", rendered)
+
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["path", "--metasploit-db", str(metadata), "--json"])
+        report = json.loads(output.getvalue())
+        self.assertEqual(report["candidate_paths"], [])
+        self.assertEqual(report["metasploit"]["service_leads"], 1)
+        self.assertEqual(
+            report["metasploit_service_leads"][0]["modules"][0]["cve_ids"],
+            ["CVE-2011-2523"],
+        )
+
     def test_path_sanitizes_scan_and_cve_text_for_the_terminal(self) -> None:
         self.scan["services"][0]["product"] = "OpenSSH\x1b[2J\nFAKE PATH"
         self.cves["matches"][0]["reason"] = "candidate\x1b[2J\nFAKE PATH"

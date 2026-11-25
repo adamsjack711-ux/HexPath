@@ -94,6 +94,14 @@ is present, the steps show how to inspect its options, configure the target if
 those options exist, and record the result of an approved test. JSON output
 contains the same steps and commands.
 
+When NVD is unreachable, `path` can still show **unconfirmed Metasploit module
+paths** for observed services if a local module title matches the exact detected
+product and version and the module's default port matches the open port. It
+prints a pasteable `use exploit/...` command and investigation steps near the
+top of the report. These service/version matches are separate from CVE-backed
+paths and do not establish vulnerability applicability or access. The report
+shows the NVD error and keeps CVE coverage marked incomplete.
+
 For a pre-authorized network behind an SSH jump server, place
 `jump-profile.json` beside the saved state file (the directory selected by
 `HEXPATH_STATE_DIR`). The profile binds one scanned entry address to the exact

@@ -233,6 +233,47 @@ class PathCliTests(unittest.TestCase):
             "CVE-2024-6387",
         )
 
+    def test_path_matches_installed_metasploit_modules_by_cve(self) -> None:
+        save_latest_scan({**self.scan, "cves": self.cves})
+        metadata = Path(self.temporary_directory.name) / "modules_metadata_base.json"
+        metadata.write_text(json.dumps({
+            "exploit/linux/ssh/example": {
+                "fullname": "exploit/linux/ssh/example",
+                "name": "Example SSH module",
+                "type": "exploit",
+                "rank": 500,
+                "references": ["CVE-2024-6387"],
+            },
+        }), encoding="utf-8")
+        output = StringIO()
+        with redirect_stdout(output):
+            exit_code = main(["path", "--metasploit-db", str(metadata), "--json"])
+        report = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(report["metasploit"]["available"])
+        self.assertEqual(report["metasploit"]["matched_leads"], 1)
+        self.assertEqual(
+            report["recommended_path"]["metasploit_modules"][0]["fullname"],
+            "exploit/linux/ssh/example",
+        )
+        self.assertFalse(report["recommended_path"]["access_evidence_recorded"])
+
+        output = StringIO()
+        with redirect_stdout(output):
+            exit_code = main(["path", "--metasploit-db", str(metadata)])
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Metasploit module: exploit/linux/ssh/example", output.getvalue())
+
+    def test_path_keeps_working_without_installed_metasploit(self) -> None:
+        save_latest_scan({**self.scan, "cves": self.cves})
+        output = StringIO()
+        with patch("hexpath.cli.find_module_metadata", return_value=None), redirect_stdout(output):
+            exit_code = main(["path", "--json"])
+        report = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(report["metasploit"]["available"])
+        self.assertEqual(report["recommended_path"]["metasploit_modules"], [])
+
     def test_path_sanitizes_scan_and_cve_text_for_the_terminal(self) -> None:
         self.scan["services"][0]["product"] = "OpenSSH\x1b[2J\nFAKE PATH"
         self.cves["matches"][0]["reason"] = "candidate\x1b[2J\nFAKE PATH"

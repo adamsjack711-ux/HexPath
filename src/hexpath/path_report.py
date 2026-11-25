@@ -11,6 +11,9 @@ from hexpath.models import Confidence
 def compile_path_report(
     scan: dict[str, Any] | list[dict[str, Any]],
     cves: dict[str, Any],
+    *,
+    metasploit_modules: dict[str, list[dict[str, Any]]] | None = None,
+    metasploit_source: str | None = None,
 ) -> dict[str, Any]:
     """Rank observed hosts and show only evidence-backed directed routes."""
     scans = [scan] if isinstance(scan, dict) else scan
@@ -117,6 +120,9 @@ def compile_path_report(
                     "reason": match.get("reason"),
                     "references": vulnerability.get("references", []),
                 },
+                "metasploit_modules": (
+                    metasploit_modules.get(cve_id.upper(), []) if metasploit_modules is not None else []
+                ),
                 "priority_cost": priority_cost,
                 "access_evidence_recorded": match.get("access_supported") is True,
                 "evidence": match.get("evidence", []),
@@ -208,6 +214,11 @@ def compile_path_report(
         ),
         "coverage": cves.get("coverage", {}),
         "coverage_complete": cves.get("completed") is True,
+        "metasploit": {
+            "available": metasploit_modules is not None,
+            "source": metasploit_source,
+            "matched_leads": sum(bool(path["metasploit_modules"]) for path in paths),
+        },
     }
 
 
@@ -221,6 +232,11 @@ def render_path_report(document: dict[str, Any]) -> str:
         f"Starting point: {document['source']}",
         f"CVE lookup coverage: {coverage}",
     ]
+    metasploit = document["metasploit"]
+    if metasploit["available"]:
+        lines.append(f"Metasploit module matches: {metasploit['matched_leads']} leads")
+    else:
+        lines.append("Metasploit module metadata unavailable; use --metasploit-db PATH.")
     hosts = document["ranked_hosts"]
     lines.extend(["", f"Hosts observed: {len(hosts)}", "Host investigation priority (CVE candidates are unconfirmed)"])
     for host in hosts:
@@ -287,6 +303,13 @@ def render_path_report(document: dict[str, Any]) -> str:
         references = finding.get("references")
         if isinstance(references, list) and references:
             candidate_lines.append(f"  Reference: {references[0]}")
+        modules = path["metasploit_modules"]
+        for module in modules[:3]:
+            candidate_lines.append(
+                f"  Metasploit module: {module['fullname']} ({module['type'] or 'unknown type'})"
+            )
+        if len(modules) > 3:
+            candidate_lines.append(f"  ... {len(modules) - 3} more modules in JSON")
         lines.extend(candidate_lines)
     return _render_lines(lines)
 

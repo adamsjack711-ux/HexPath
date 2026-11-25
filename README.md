@@ -72,6 +72,36 @@ hexpath path --scan entry-scan.json --scan second-vantage-scan.json \
 `hexpath path --json` prints structured results, and `-o report.json` saves
 them. The default no-argument form reuses embedded CVE results when available.
 
+If Metasploit Framework is installed, `hexpath path` reads its local
+`db/modules_metadata_base.json` and lists modules whose declared CVE references
+match the report's CVE candidates. Set `MSF_ROOT` to the framework directory or
+pass `--metasploit-db` with that directory or the metadata file when it is not
+in a common installation location:
+
+```sh
+hexpath path --metasploit-db /usr/share/metasploit-framework --json
+```
+
+The module names are research leads. A CVE reference in Metasploit does not
+confirm that a module applies to a scanned host, and it does not record access
+or change the path ranking. The JSON report records whether module metadata was
+available and includes all matching module names, types, and ranks per lead.
+Without a local Framework installation, path analysis still works and reports
+that module metadata is unavailable.
+Each lead also includes numbered investigation steps and the exact command to
+paste into `msfconsole`, such as `search cve:2017-0144`. When a matching module
+is present, the steps show how to inspect its options, configure the target if
+those options exist, and record the result of an approved test. JSON output
+contains the same steps and commands.
+
+When NVD is unreachable, `path` can still show **unconfirmed Metasploit module
+paths** for observed services if a local module title matches the exact detected
+product and version and the module's default port matches the open port. It
+prints a pasteable `use exploit/...` command and investigation steps near the
+top of the report. These service/version matches are separate from CVE-backed
+paths and do not establish vulnerability applicability or access. The report
+shows the NVD error and keeps CVE coverage marked incomplete.
+
 For a pre-authorized network behind an SSH jump server, place
 `jump-profile.json` beside the saved state file (the directory selected by
 `HEXPATH_STATE_DIR`). The profile binds one scanned entry address to the exact

@@ -42,6 +42,7 @@ from hexpath.scanner import (
     scan_profile_for_level,
 )
 from hexpath.jump import load_jump_profile, scan_through_jump
+from hexpath.metasploit import find_module_metadata, load_module_index
 from hexpath.path_report import compile_path_report, render_path_report
 from hexpath.scope import Scope, ScopeError
 from hexpath.setup import SetupError, find_nmap, setup_nmap, verify_nmap
@@ -131,6 +132,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=30,
         help="maximum time for each NVD request in seconds",
+    )
+    path_parser.add_argument(
+        "--metasploit-db",
+        help="installed Metasploit Framework root or db/modules_metadata_base.json",
     )
 
     scope_parser = subcommands.add_parser(
@@ -760,12 +765,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if not args.scan:
                     scans[0]["cves"] = cves
                     save_latest_scan(scans[0])
-            report = compile_path_report(scans, cves)
+            metadata_path = find_module_metadata(args.metasploit_db)
+            modules = load_module_index(metadata_path) if metadata_path else None
+            report = compile_path_report(
+                scans, cves,
+                metasploit_modules=modules,
+                metasploit_source=str(metadata_path) if metadata_path else None,
+            )
             serialized = json.dumps(report, indent=2, sort_keys=True)
             if args.output:
                 Path(args.output).write_text(serialized + "\n", encoding="utf-8")
             print(serialized if args.json else render_path_report(report))
-            return 0 if report["candidate_paths"] else 1
+            return 0 if report["candidate_paths"] or report["metasploit_service_leads"] else 1
         if args.command == "assess":
             scope = Scope.from_json_file(args.scope)
             # The objective's address family decides whether this is an IPv4 or
